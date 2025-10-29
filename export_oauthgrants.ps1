@@ -231,6 +231,32 @@ function Get-ServicePrincipalMetadata {
     return $results
 }
 
+function Test-ServicePrincipalHidden {
+    param([string[]]$Tags)
+    if (-not $Tags) { return $false }
+    foreach ($tag in $Tags) {
+        if ([string]::IsNullOrWhiteSpace($tag)) { continue }
+        switch -Regex ($tag) {
+            '^HideApp$' { return $true }
+            '^HideAppForManagedApps$' { return $true }
+            '^NonVisibleToUsers$' { return $true }
+        }
+    }
+    return $false
+}
+
+function Get-AllServicePrincipals {
+    $select = 'id,appId,displayName,appOwnerOrganizationId,publisherName,publisherDomain,tags,servicePrincipalNames,servicePrincipalType,verifiedPublisher'
+    $baseUri = "https://graph.microsoft.com/beta/servicePrincipals?\$count=true&\$top=999&includeHidden=true&\$select=$select"
+    try {
+        return Invoke-GraphPaged -Uri $baseUri
+    } catch {
+        Write-Warning ("Unable to include hidden service principals via includeHidden=true: {0}" -f $_.Exception.Message)
+        $fallbackUri = "https://graph.microsoft.com/beta/servicePrincipals?\$count=true&\$top=999&\$select=$select"
+        return Invoke-GraphPaged -Uri $fallbackUri
+    }
+}
+
 function New-ServicePrincipalProfile {
     param([pscustomobject]$Source)
     if (-not $Source) { return $null }
@@ -606,12 +632,14 @@ foreach ($group in $recordsByClient) {
     }
 
     $vendorInfo = Get-MicrosoftVendorInfo -Profile $clientProfile -TenantDomains $tenantDomains -TenantDisplayName $tenantDisplayName
+    $isHiddenApp = Test-ServicePrincipalHidden -Tags $clientProfile.Tags
     $userScopeCount = @($userGrants | Select-Object -ExpandProperty scope -Unique).Count
     $userCount = @($userGrants | ForEach-Object { $_.users } | Where-Object { $_ } | Select-Object -Unique).Count
 
     $tags = @()
     if ($vendorInfo.IsMicrosoft) { $tags += 'Microsoft' }
     elseif ($vendorInfo.IsThirdParty) { $tags += '3rd Party' }
+    if ($isHiddenApp) { $tags += 'Hidden' }
     if ($administratorGrants) { $tags += 'Admin Consent' }
     if ($userGrants) { $tags += 'User Consent' }
     $tags += "user-perm: $userScopeCount"
@@ -625,10 +653,97 @@ foreach ($group in $recordsByClient) {
         tags          = $tags
         isMicrosoft   = $vendorInfo.IsMicrosoft
         isThirdParty  = $vendorInfo.IsThirdParty
+        isHidden      = $isHiddenApp
         vendorInfo    = $vendorInfo
         adminGrants   = $administratorGrants
         userGrants    = $userGrants
         allScopes     = $allScopes
+    }
+}
+
+$summariesByClientId = @{}
+foreach ($summary in $appSummaries) {
+    if ($summary.clientId) { $summariesByClientId[$summary.clientId] = $summary }
+}
+
+$allServicePrincipals = @()
+try {
+    $allServicePrincipals = Get-AllServicePrincipals
+} catch {
+    Write-Warning ("Unable to retrieve complete service principal list: {0}" -f $_.Exception.Message)
+    $allServicePrincipals = @()
+}
+
+foreach ($spRaw in $allServicePrincipals) {
+    $spId = Get-GraphResponseProperty -Response $spRaw -PropertyName 'id'
+    if (-not $spId) { continue }
+
+    $profile = $null
+    if ($servicePrincipals.ContainsKey($spId)) {
+        $profile = $servicePrincipals[$spId]
+        Merge-ServicePrincipalProfile -Target $profile -Source $spRaw
+    } else {
+        $profile = New-ServicePrincipalProfile -Source $spRaw
+        if ($profile) { $servicePrincipals[$spId] = $profile }
+    }
+    if (-not $profile) { continue }
+
+    $vendorInfo = Get-MicrosoftVendorInfo -Profile $profile -TenantDomains $tenantDomains -TenantDisplayName $tenantDisplayName
+    $isHiddenSp = Test-ServicePrincipalHidden -Tags $profile.Tags
+
+    if ($summariesByClientId.ContainsKey($spId)) {
+        $summary = $summariesByClientId[$spId]
+        $summary.vendorInfo = $vendorInfo
+        $summary.isMicrosoft = $vendorInfo.IsMicrosoft
+        $summary.isThirdParty = $vendorInfo.IsThirdParty
+        $summary.isHidden = $isHiddenSp
+
+        if ($vendorInfo.IsMicrosoft) {
+            if (-not ($summary.tags -contains 'Microsoft')) { $summary.tags += 'Microsoft' }
+            $summary.tags = @($summary.tags | Where-Object { $_ -ne '3rd Party' })
+        } elseif ($vendorInfo.IsThirdParty) {
+            if (-not ($summary.tags -contains '3rd Party')) { $summary.tags += '3rd Party' }
+            $summary.tags = @($summary.tags | Where-Object { $_ -ne 'Microsoft' })
+        } else {
+            $summary.tags = @($summary.tags | Where-Object { ($_ -ne 'Microsoft') -and ($_ -ne '3rd Party') })
+        }
+
+        if ($isHiddenSp) {
+            if (-not ($summary.tags -contains 'Hidden')) { $summary.tags += 'Hidden' }
+        } else {
+            $summary.tags = @($summary.tags | Where-Object { $_ -ne 'Hidden' })
+        }
+
+        $hasGrants = (@($summary.adminGrants).Count -gt 0) -or (@($summary.userGrants).Count -gt 0)
+        if ($hasGrants) {
+            $summary.tags = @($summary.tags | Where-Object { $_ -ne 'No OAuth grants' })
+        } elseif (-not ($summary.tags -contains 'No OAuth grants')) {
+            $summary.tags += 'No OAuth grants'
+        }
+    } else {
+        $nameFallback = if ($profile.Name) { $profile.Name } elseif ($profile.AppId) { $profile.AppId } else { $spId }
+        $tags = @()
+        if ($vendorInfo.IsMicrosoft) { $tags += 'Microsoft' }
+        elseif ($vendorInfo.IsThirdParty) { $tags += '3rd Party' }
+        if ($isHiddenSp) { $tags += 'Hidden' }
+        $tags += 'No OAuth grants'
+
+        $newSummary = [pscustomobject]@{
+            clientId     = $spId
+            clientName   = $nameFallback
+            clientAppId  = $profile.AppId
+            status       = 'pass'
+            tags         = $tags
+            isMicrosoft  = $vendorInfo.IsMicrosoft
+            isThirdParty = $vendorInfo.IsThirdParty
+            isHidden     = $isHiddenSp
+            vendorInfo   = $vendorInfo
+            adminGrants  = @()
+            userGrants   = @()
+            allScopes    = @()
+        }
+        $appSummaries += $newSummary
+        $summariesByClientId[$spId] = $newSummary
     }
 }
 
@@ -649,6 +764,7 @@ $appSummaries |
                   status,
                   @{n='isMicrosoft';e={$_.isMicrosoft}},
                   @{n='isThirdParty';e={$_.isThirdParty}},
+                  @{n='isHidden';e={$_.isHidden}},
                   @{n='publisher';e={$_.vendorInfo.Publisher}},
                   @{n='publisherDomain';e={$_.vendorInfo.PublisherDomain}},
                   @{n='publisherDomainMatchesMicrosoft';e={$_.vendorInfo.PublisherDomainMatchesMicrosoft}},
@@ -728,8 +844,9 @@ $htmlTemplate = @'
   .tag{background:#0c1319;border:1px solid #1a2a33;padding:2px 8px;border-radius:999px;font-size:12px;transition:background-color .18s ease,border-color .18s ease,color .18s ease,box-shadow .18s ease,transform .18s ease}
   .tag-admin{background:rgba(122,209,43,0.12);border-color:#2f4;color:#bdf8a7}
   .tag-user{background:rgba(0,194,168,0.12);border-color:#0bd;color:#a6fff3}
-  .tag-microsoft{background:rgba(77,163,255,0.14);border-color:rgba(77,163,255,0.7);color:#bcdcff}
-  .tag-thirdparty{background:rgba(255,177,71,0.12);border-color:rgba(255,177,71,0.7);color:#ffd7a2}
+    .tag-microsoft{background:rgba(77,163,255,0.14);border-color:rgba(77,163,255,0.7);color:#bcdcff}
+    .tag-thirdparty{background:rgba(255,177,71,0.12);border-color:rgba(255,177,71,0.7);color:#ffd7a2}
+    .tag-hidden{background:rgba(148,163,184,0.12);border-color:rgba(148,163,184,0.6);color:#d8dee9;font-style:italic}
   .tag-clickable{cursor:pointer}
   .tag-clickable:focus-visible{outline:none;box-shadow:var(--focus-ring)}
   .tag-clickable:hover{transform:translateY(-1px)}
@@ -929,7 +1046,8 @@ function tagHtml(t){
   const isAdmin = lower === "admin consent";
   const isUser  = lower === "user consent";
   const isMicrosoft = lower === "microsoft";
-    const isThirdParty = lower === "3rd party";
+  const isThirdParty = lower === "3rd party";
+  const isHidden = lower === "hidden";
   if (isAdmin || isUser){
     const consent = isAdmin ? "admin" : "user";
     const classes = ["tag", isAdmin ? "tag-admin" : "tag-user", "tag-clickable"];
@@ -937,17 +1055,20 @@ function tagHtml(t){
     if(active){ classes.push("tag-active"); }
     return `<span class="${classes.join(" ")}" data-consent="${consent}" role="button" tabindex="0" aria-pressed="${active}">${label}</span>`;
   }
-    if (isMicrosoft){
-        const active = state.vendor === "microsoft";
-        const classes = ["tag", "tag-microsoft", "tag-clickable"];
-        if(active){ classes.push("tag-active"); }
-        return `<span class="${classes.join(" ")}" data-vendor="microsoft" role="button" tabindex="0" aria-pressed="${active}">${label}</span>`;
-    }
-    if (isThirdParty){
-        const active = state.vendor === "thirdparty";
-        const classes = ["tag", "tag-thirdparty", "tag-clickable"];
-        if(active){ classes.push("tag-active"); }
-        return `<span class="${classes.join(" ")}" data-vendor="thirdparty" role="button" tabindex="0" aria-pressed="${active}">${label}</span>`;
+  if (isMicrosoft){
+    const active = state.vendor === "microsoft";
+    const classes = ["tag", "tag-microsoft", "tag-clickable"];
+    if(active){ classes.push("tag-active"); }
+    return `<span class="${classes.join(" ")}" data-vendor="microsoft" role="button" tabindex="0" aria-pressed="${active}">${label}</span>`;
+  }
+  if (isThirdParty){
+    const active = state.vendor === "thirdparty";
+    const classes = ["tag", "tag-thirdparty", "tag-clickable"];
+    if(active){ classes.push("tag-active"); }
+    return `<span class="${classes.join(" ")}" data-vendor="thirdparty" role="button" tabindex="0" aria-pressed="${active}">${label}</span>`;
+  }
+  if (isHidden){
+    return `<span class="tag tag-hidden">${label}</span>`;
   }
   return `<span class="tag">${label}</span>`;
 }
@@ -956,8 +1077,8 @@ function filterItems(items){
   if(state.status !== "all"){ out = out.filter(x => (x.status||"") === state.status); }
   if(state.consent === "admin"){ out = out.filter(x => (x.adminGrants||[]).length > 0); }
   if(state.consent === "user"){ out = out.filter(x => (x.userGrants||[]).length > 0); }
-    if(state.vendor === "microsoft"){ out = out.filter(x => x.isMicrosoft); }
-    if(state.vendor === "thirdparty"){ out = out.filter(x => x.isThirdParty); }
+  if(state.vendor === "microsoft"){ out = out.filter(x => x.isMicrosoft); }
+  if(state.vendor === "thirdparty"){ out = out.filter(x => x.isThirdParty); }
   if(state.q){
     const q = state.q;
     out = out.filter(x => (x.clientName||"").toLowerCase().includes(q));
@@ -1048,23 +1169,24 @@ function copyJson(obj){ navigator.clipboard.writeText(JSON.stringify(obj,null,2)
 // Export CSV (current filter selection)
 document.getElementById("exportCsv").addEventListener("click", () => {
   const items = filterItems(report.items);
-    const headers = ["clientName","clientAppId","status","isMicrosoft","isThirdParty","tags","adminScopes","userScopes","userCount"];
+  const headers = ["clientName","clientAppId","status","isMicrosoft","isThirdParty","isHidden","tags","adminScopes","userScopes","userCount"];
   const rows = items.map(x=>{
     const adminScopes = (x.adminGrants||[]).map(a=>`${a.resource}:${a.scope}`).join(";")
     const userScopes  = (x.userGrants ||[]).map(u=>`${u.resource}:${u.scope}`).join(";")
     const userCount   = (x.userGrants ||[]).flatMap(u => asArray(u.users)).filter((v,i,arr)=>arr.indexOf(v)===i).length;
-    const tags = (x.tags||[]).join(";");
-        return {
-            clientName: x.clientName||"",
-            clientAppId: x.clientAppId||"",
-            status: x.status||"",
-            isMicrosoft: x.isMicrosoft ? "true" : "false",
-            isThirdParty: x.isThirdParty ? "true" : "false",
-            tags,
-            adminScopes,
-            userScopes,
-            userCount
-        };
+    const tags = (x.tags||[]).join(";")
+    return {
+      clientName: x.clientName||"",
+      clientAppId: x.clientAppId||"",
+      status: x.status||"",
+      isMicrosoft: x.isMicrosoft ? "true" : "false",
+      isThirdParty: x.isThirdParty ? "true" : "false",
+      isHidden: x.isHidden ? "true" : "false",
+      tags,
+      adminScopes,
+      userScopes,
+      userCount
+    };
   });
   const csv = [headers.join(",")].concat(rows.map(r=>headers.map(h=>`"${String(r[h]).replace(/"/g,'""')}"`).join(","))).join("\n");
   const blob = new Blob([csv], {type:"text/csv;charset=utf-8;"});

@@ -7,6 +7,7 @@ PowerShell script that inventories Entra ID OAuth delegated consents, enriches t
 - Queries `oauth2PermissionGrants` via Microsoft Graph and deduplicates grants per enterprise application.
 - Pulls extended service principal metadata (publisher, verified publisher, service principal names, tags).
 - Classifies apps as Microsoft, tenant-owned, or third party using multiple heuristics.
+- Includes hidden enterprise applications by enriching the data set with the complete tenant service principal inventory.
 - Highlights risky scopes (e.g., `*ReadWrite*`, `Directory.AccessAsUser.All`) and flags low-impact grants.
 - Generates outputs:
   - **CSV** with raw data and metadata for spreadsheets or SIEM ingestion.
