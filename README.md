@@ -1,4 +1,4 @@
-# Export OAuth Grants
+# Consentra - Export Entra OAuth2 Grants
 
 PowerShell script that inventories Entra ID OAuth delegated consents, enriches them with service principal metadata, and produces both CSV and interactive HTML reports for security reviews.
 
