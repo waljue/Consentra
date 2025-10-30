@@ -42,13 +42,13 @@ Run the script from the repo root (or provide the full path):
 
 ```powershell
 # Export all grants
-./export_oauthgrants.ps1
+./consentra.ps1
 
 # Filter to apps whose display name contains "ServiceNow"
-./export_oauthgrants.ps1 -AppNameContains "ServiceNow"
+./consentra.ps1 -AppNameContains "ServiceNow"
 ```
 
-> 💡 On Windows PowerShell run `.\export_oauthgrants.ps1`; on macOS/Linux under PowerShell 7 you can use `./export_oauthgrants.ps1` as shown above.
+> 💡 On Windows PowerShell run `.\consentra.ps1`; on macOS/Linux under PowerShell 7 you can use `./consentra.ps1` as shown above.
 
 Outputs are written to the current directory:
 
