@@ -349,6 +349,7 @@ function Get-MicrosoftVendorInfo {
     $vendorInfo = [ordered]@{
         IsMicrosoft                          = $false
         IsThirdParty                         = $false
+        IsHomeTenant                         = $false
         OwnerOrg                             = $Profile.AppOwnerOrgId
         OwnerOrgMatch                        = $false
         Publisher                            = $Profile.Publisher
@@ -454,7 +455,7 @@ function Get-MicrosoftVendorInfo {
         $isTenantPublisher = $vendorInfo.PublisherDomainMatchesTenant -or
                               $vendorInfo.ServicePrincipalNameMatchesTenant -or
                               ($Profile.Publisher -and $TenantDisplayName -and ($Profile.Publisher -eq $TenantDisplayName))
-
+        if ($isTenantPublisher) { $vendorInfo.IsHomeTenant = $true }
         if ($Profile.VerifiedPublisherName) {
             $vendorInfo.IsThirdParty = (-not $vendorInfo.VerifiedPublisherMatchesMicrosoft -and -not $isTenantPublisher)
         } elseif ($Profile.PublisherDomain) {
@@ -639,6 +640,7 @@ foreach ($group in $recordsByClient) {
     $tags = @()
     if ($vendorInfo.IsMicrosoft) { $tags += 'Microsoft' }
     elseif ($vendorInfo.IsThirdParty) { $tags += '3rd Party' }
+    elseif ($vendorInfo.IsHomeTenant) { $tags += 'Home Tenant' }
     if ($isHiddenApp) { $tags += 'Hidden' }
     if ($administratorGrants) { $tags += 'Admin Consent' }
     if ($userGrants) { $tags += 'User Consent' }
@@ -653,6 +655,7 @@ foreach ($group in $recordsByClient) {
         tags          = $tags
         isMicrosoft   = $vendorInfo.IsMicrosoft
         isThirdParty  = $vendorInfo.IsThirdParty
+        isHomeTenant  = $vendorInfo.IsHomeTenant
         isHidden      = $isHiddenApp
         vendorInfo    = $vendorInfo
         adminGrants   = $administratorGrants
@@ -696,35 +699,18 @@ foreach ($spRaw in $allServicePrincipals) {
         $summary.vendorInfo = $vendorInfo
         $summary.isMicrosoft = $vendorInfo.IsMicrosoft
         $summary.isThirdParty = $vendorInfo.IsThirdParty
+        $summary.isHomeTenant = $vendorInfo.IsHomeTenant
         $summary.isHidden = $isHiddenSp
-
-        if ($vendorInfo.IsMicrosoft) {
-            if (-not ($summary.tags -contains 'Microsoft')) { $summary.tags += 'Microsoft' }
-            $summary.tags = @($summary.tags | Where-Object { $_ -ne '3rd Party' })
-        } elseif ($vendorInfo.IsThirdParty) {
-            if (-not ($summary.tags -contains '3rd Party')) { $summary.tags += '3rd Party' }
-            $summary.tags = @($summary.tags | Where-Object { $_ -ne 'Microsoft' })
-        } else {
-            $summary.tags = @($summary.tags | Where-Object { ($_ -ne 'Microsoft') -and ($_ -ne '3rd Party') })
-        }
-
-        if ($isHiddenSp) {
-            if (-not ($summary.tags -contains 'Hidden')) { $summary.tags += 'Hidden' }
-        } else {
-            $summary.tags = @($summary.tags | Where-Object { $_ -ne 'Hidden' })
-        }
-
-        $hasGrants = (@($summary.adminGrants).Count -gt 0) -or (@($summary.userGrants).Count -gt 0)
-        if ($hasGrants) {
-            $summary.tags = @($summary.tags | Where-Object { $_ -ne 'No OAuth grants' })
-        } elseif (-not ($summary.tags -contains 'No OAuth grants')) {
-            $summary.tags += 'No OAuth grants'
-        }
+        $summary.tags = @($summary.tags | Where-Object { ($_ -ne 'Microsoft') -and ($_ -ne '3rd Party') -and ($_ -ne 'Home Tenant') })
+        if ($vendorInfo.IsMicrosoft) { $summary.tags += 'Microsoft' }
+        elseif ($vendorInfo.IsThirdParty) { $summary.tags += '3rd Party' }
+        elseif ($vendorInfo.IsHomeTenant) { $summary.tags += 'Home Tenant' }
     } else {
         $nameFallback = if ($profile.Name) { $profile.Name } elseif ($profile.AppId) { $profile.AppId } else { $spId }
         $tags = @()
         if ($vendorInfo.IsMicrosoft) { $tags += 'Microsoft' }
         elseif ($vendorInfo.IsThirdParty) { $tags += '3rd Party' }
+        elseif ($vendorInfo.IsHomeTenant) { $tags += 'Home Tenant' }
         if ($isHiddenSp) { $tags += 'Hidden' }
         $tags += 'No OAuth grants'
 
@@ -736,6 +722,7 @@ foreach ($spRaw in $allServicePrincipals) {
             tags         = $tags
             isMicrosoft  = $vendorInfo.IsMicrosoft
             isThirdParty = $vendorInfo.IsThirdParty
+            isHomeTenant = $vendorInfo.IsHomeTenant
             isHidden     = $isHiddenSp
             vendorInfo   = $vendorInfo
             adminGrants  = @()
@@ -753,6 +740,7 @@ $passCount = @($appSummaries | Where-Object status -eq 'pass').Count
 $warnCount = @($appSummaries | Where-Object status -eq 'warn').Count
 $microsoftCount = @($appSummaries | Where-Object isMicrosoft).Count
 $thirdPartyCount = @($appSummaries | Where-Object isThirdParty).Count
+$homeTenantCount = @($appSummaries | Where-Object isHomeTenant).Count
 
 $outDir = (Get-Location).Path
 $timestamp = Get-Date -Format 'yyyyMMdd_HHmm'
@@ -764,6 +752,7 @@ $appSummaries |
                   status,
                   @{n='isMicrosoft';e={$_.isMicrosoft}},
                   @{n='isThirdParty';e={$_.isThirdParty}},
+                  @{n='isHomeTenant';e={$_.isHomeTenant}},
                   @{n='isHidden';e={$_.isHidden}},
                   @{n='publisher';e={$_.vendorInfo.Publisher}},
                   @{n='publisherDomain';e={$_.vendorInfo.PublisherDomain}},
@@ -791,7 +780,7 @@ $appSummaries |
 
 $report = [pscustomobject]@{
     generatedAt = (Get-Date).ToString('s')
-    totals      = @{ total=$totalApps; pass=$passCount; warn=$warnCount; fail=$failCount; microsoft=$microsoftCount; thirdParty=$thirdPartyCount }
+    totals      = @{ total=$totalApps; pass=$passCount; warn=$warnCount; fail=$failCount; microsoft=$microsoftCount; thirdParty=$thirdPartyCount; homeTenant=$homeTenantCount }
     items       = $appSummaries
 }
 
@@ -846,6 +835,7 @@ $htmlTemplate = @'
   .tag-user{background:rgba(0,194,168,0.12);border-color:#0bd;color:#a6fff3}
     .tag-microsoft{background:rgba(77,163,255,0.14);border-color:rgba(77,163,255,0.7);color:#bcdcff}
     .tag-thirdparty{background:rgba(255,177,71,0.12);border-color:rgba(255,177,71,0.7);color:#ffd7a2}
+    .tag-home{background:rgba(0,194,168,0.16);border:1px solid rgba(0,194,168,0.55);color:#d5fff6}
     .tag-hidden{background:rgba(148,163,184,0.12);border-color:rgba(148,163,184,0.6);color:#d8dee9;font-style:italic}
   .tag-clickable{cursor:pointer}
   .tag-clickable:focus-visible{outline:none;box-shadow:var(--focus-ring)}
@@ -871,29 +861,43 @@ $htmlTemplate = @'
   .footer{padding:20px;color:#9aa3b2;text-align:center;border-top:1px solid var(--line)}
     .status.microsoft{background:var(--microsoft)}
     .status.thirdparty{background:var(--thirdparty)}
+    .status.home{background:var(--brand-2);}
   .list-counter{max-width:1100px;margin:12px auto 0;padding:0 16px;color:#9aa3b2;font-size:13px}
   .list-counter b{color:var(--text)}
   .footer .sig{display:inline-flex;gap:8px;align-items:center}
   .icon{width:16px;height:16px;vertical-align:-3px;fill:#0e76a8}
+  .header-grid{display:grid;gap:12px;}
+  .header-top{display:flex;align-items:center;gap:12px;}
+  .header-top h1{margin:0;font-size:16px;font-weight:600;}
+  .app-count{margin-left:auto;color:var(--muted);font-size:14px;}
+  .app-count b{color:var(--text);font-size:16px;}
+  .header-scopes,
+  .header-filters{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .header-controls{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:2px;}
 </style>
 </head>
 <body>
 <header>
-  <div class="wrap row">
-    <strong style="font-size:16px">Entra ID – OAuth2 Consent Report</strong>
-
-        <!-- Filter chips -->
-    <span id="chipTotal" class="chip clickable" role="button" tabindex="0" aria-pressed="false"><b id="tTotal">0</b> Enterprise apps</span>
-  <span id="chipFail"  class="chip clickable" role="button" tabindex="0" aria-pressed="false"><span class="status fail"></span><b id="tFail">0</b> Critical scopes</span>
-  <span id="chipWarn"  class="chip clickable" role="button" tabindex="0" aria-pressed="false"><span class="status warn"></span><b id="tWarn">0</b> Elevated scopes</span>
-    <span id="chipPass"  class="chip clickable" role="button" tabindex="0" aria-pressed="false"><span class="status pass"></span><b id="tPass">0</b> Low impact only</span>
-    <span id="chipMicrosoft" class="chip clickable" role="button" tabindex="0" aria-pressed="false"><span class="status microsoft"></span><b id="tMicrosoft">0</b> Microsoft apps</span>
-    <span id="chipThirdParty" class="chip clickable" role="button" tabindex="0" aria-pressed="false"><span class="status thirdparty"></span><b id="tThirdParty">0</b> 3rd party apps</span>
-
-    <div style="flex:1"></div>
-    <input id="q" type="search" placeholder="Search enterprise app" />
-    <button id="sortToggle" type="button" aria-pressed="false" title="Sort enterprise apps alphabetically">Sort A→Z</button>
-    <button id="exportCsv" title="Export filtered apps to CSV">Export CSV</button>
+  <div class="wrap header-grid">
+    <div class="header-top">
+      <h1>Entra ID – OAuth Consent Report</h1>
+      <span class="app-count"><b id="tTotal">0</b> Enterprise apps</span>
+    </div>
+    <div class="header-scopes">
+      <span id="chipCritical" class="chip clickable" role="button" tabindex="0" aria-pressed="false"><span class="status fail"></span><b id="tFail">0</b> Critical scopes</span>
+      <span id="chipElevated" class="chip clickable" role="button" tabindex="0" aria-pressed="false"><span class="status warn"></span><b id="tWarn">0</b> Elevated scopes</span>
+      <span id="chipLow" class="chip clickable" role="button" tabindex="0" aria-pressed="false"><span class="status pass"></span><b id="tPass">0</b> Low impact only</span>
+    </div>
+    <div class="header-filters">
+      <span id="chipMicrosoft" class="chip clickable" role="button" tabindex="0" aria-pressed="false"><span class="status microsoft"></span><b id="tMicrosoft">0</b> Microsoft apps</span>
+      <span id="chipThirdParty" class="chip clickable" role="button" tabindex="0" aria-pressed="false"><span class="status thirdparty"></span><b id="tThirdParty">0</b> 3rd party apps</span>
+      <span id="chipHomeTenant" class="chip clickable" role="button" tabindex="0" aria-pressed="false"><span class="status home"></span><b id="tHomeTenant">0</b> Home tenant apps</span>
+    </div>
+    <div class="header-controls">
+      <input id="q" type="search" placeholder="Search enterprise app" />
+      <button id="sortToggle" type="button" aria-pressed="false" title="Sort enterprise apps alphabetically">Sort A→Z</button>
+      <button id="exportCsv" title="Export filtered apps to CSV">Export CSV</button>
+    </div>
   </div>
 </header>
 <div class="wrap list-counter" aria-live="polite">Currently visible: <b id="visibleCount">0</b> enterprise apps</div>
@@ -918,12 +922,12 @@ const $q = document.getElementById("q");
 const $list = document.getElementById("list");
 
 // Chips
-const $chipTotal = document.getElementById("chipTotal");
-const $chipFail  = document.getElementById("chipFail");
-const $chipWarn  = document.getElementById("chipWarn");
-const $chipPass  = document.getElementById("chipPass");
+const $chipCritical = document.getElementById("chipCritical");
+const $chipElevated = document.getElementById("chipElevated");
+const $chipLow = document.getElementById("chipLow");
 const $chipMicrosoft = document.getElementById("chipMicrosoft");
 const $chipThirdParty = document.getElementById("chipThirdParty");
+const $chipHomeTenant = document.getElementById("chipHomeTenant");
 const $visibleCount = document.getElementById("visibleCount");
 const $sortToggle = document.getElementById("sortToggle");
 
@@ -934,6 +938,7 @@ document.getElementById("tWarn").textContent  = report.totals.warn;
 document.getElementById("tFail").textContent  = report.totals.fail;
 document.getElementById("tMicrosoft").textContent = report.totals.microsoft;
 document.getElementById("tThirdParty").textContent = report.totals.thirdParty;
+document.getElementById("tHomeTenant").textContent = report.totals.homeTenant;
 document.getElementById("genAt").textContent  = report.generatedAt;
 
 // Search input
@@ -954,19 +959,18 @@ $sortToggle.addEventListener("click", ()=>{
 updateSortButton();
 
 // Filter chip UI
-function setStatusFilter(filter){
-  state.status = filter;
+function toggleStatusFilter(filter){
+  state.status = state.status === filter ? "all" : filter;
   updateStatusChips();
   render();
 }
 function updateStatusChips(){
-  const mapping = [
-    [$chipTotal, "all"],
-    [$chipFail, "fail"],
-    [$chipWarn, "warn"],
-    [$chipPass, "pass"]
-  ];
-  mapping.forEach(([chip, value])=>{
+  [
+    [$chipCritical,"fail"],
+    [$chipElevated,"warn"],
+    [$chipLow,"pass"]
+  ].forEach(([chip,value])=>{
+    if(!chip) return;
     const active = state.status === value;
     chip.classList.toggle("active", active);
     chip.setAttribute("aria-pressed", String(active));
@@ -978,23 +982,26 @@ function toggleVendorFilter(vendor){
     render();
 }
 function updateVendorChips(){
-    const vendorMapping = [
-        [$chipMicrosoft, "microsoft"],
-        [$chipThirdParty, "thirdparty"]
-    ];
-    vendorMapping.forEach(([chip, value])=>{
-        const active = state.vendor === value;
-        chip.classList.toggle("active", active);
-        chip.setAttribute("aria-pressed", String(active));
-    });
+  const vendorMapping = [
+    [$chipMicrosoft, "microsoft"],
+    [$chipThirdParty, "thirdparty"],
+    [$chipHomeTenant, "home"]
+  ];
+  vendorMapping.forEach(([chip,value])=>{
+    if(!chip) return;
+    const active = state.vendor === value;
+    chip.classList.toggle("active", active);
+    chip.setAttribute("aria-pressed", String(active));
+  });
 }
-$chipTotal.addEventListener("click", ()=> setStatusFilter("all"));
-$chipFail .addEventListener("click", ()=> setStatusFilter("fail"));
-$chipWarn .addEventListener("click", ()=> setStatusFilter("warn"));
-$chipPass .addEventListener("click", ()=> setStatusFilter("pass"));
+$chipCritical.addEventListener("click", ()=> toggleStatusFilter("fail"));
+$chipElevated.addEventListener("click", ()=> toggleStatusFilter("warn"));
+$chipLow.addEventListener("click", ()=> toggleStatusFilter("pass"));
 $chipMicrosoft.addEventListener("click", ()=> toggleVendorFilter("microsoft"));
 $chipThirdParty.addEventListener("click", ()=> toggleVendorFilter("thirdparty"));
-[$chipTotal,$chipFail,$chipWarn,$chipPass,$chipMicrosoft,$chipThirdParty].forEach(chip=>{
+$chipHomeTenant.addEventListener("click", ()=> toggleVendorFilter("home"));
+[$chipCritical,$chipElevated,$chipLow,$chipMicrosoft,$chipThirdParty,$chipHomeTenant].forEach(chip=>{
+  if(!chip) return;
   chip.addEventListener("keydown", event=>{
     if(event.key === "Enter" || event.key === " "){
       event.preventDefault();
@@ -1047,6 +1054,7 @@ function tagHtml(t){
   const isUser  = lower === "user consent";
   const isMicrosoft = lower === "microsoft";
   const isThirdParty = lower === "3rd party";
+  const isHomeTenant = lower === "home tenant";
   const isHidden = lower === "hidden";
   if (isAdmin || isUser){
     const consent = isAdmin ? "admin" : "user";
@@ -1067,6 +1075,12 @@ function tagHtml(t){
     if(active){ classes.push("tag-active"); }
     return `<span class="${classes.join(" ")}" data-vendor="thirdparty" role="button" tabindex="0" aria-pressed="${active}">${label}</span>`;
   }
+  if (isHomeTenant){
+    const active = state.vendor === "home";
+    const classes = ["tag","tag-home","tag-clickable"];
+    if(active){ classes.push("tag-active"); }
+    return `<span class="${classes.join(" ")}" data-vendor="home" role="button" tabindex="0" aria-pressed="${active}">${label}</span>`;
+  }
   if (isHidden){
     return `<span class="tag tag-hidden">${label}</span>`;
   }
@@ -1079,6 +1093,7 @@ function filterItems(items){
   if(state.consent === "user"){ out = out.filter(x => (x.userGrants||[]).length > 0); }
   if(state.vendor === "microsoft"){ out = out.filter(x => x.isMicrosoft); }
   if(state.vendor === "thirdparty"){ out = out.filter(x => x.isThirdParty); }
+  if(state.vendor === "home"){ out = out.filter(x => x.isHomeTenant); }
   if(state.q){
     const q = state.q;
     out = out.filter(x => (x.clientName||"").toLowerCase().includes(q));
@@ -1121,7 +1136,7 @@ function render(){
     const none = (!hasAdmin && !hasUser) ? "<div class='consent-row' style='color:#7b8794'>No delegated grants found.</div>" : "";
     const scopeArr = asArray(item.allScopes);
     const info = item.vendorInfo || {};
-    const vendorClass = info.IsMicrosoft ? "Microsoft" : (info.IsThirdParty ? "3rd Party" : "Custom / unknown");
+    const vendorClass = info.IsMicrosoft ? "Microsoft" : (info.IsThirdParty ? "3rd Party" : (info.IsHomeTenant ? "Home tenant" : "Custom / unknown"));
     const vendorClassEsc = escapeHtml(vendorClass);
     const verifiedPublisherRaw = info.VerifiedPublisherName || info.Publisher || "—";
     const verifiedPublisherEsc = escapeHtml(verifiedPublisherRaw);
@@ -1169,7 +1184,7 @@ function copyJson(obj){ navigator.clipboard.writeText(JSON.stringify(obj,null,2)
 // Export CSV (current filter selection)
 document.getElementById("exportCsv").addEventListener("click", () => {
   const items = filterItems(report.items);
-  const headers = ["clientName","clientAppId","status","isMicrosoft","isThirdParty","isHidden","tags","adminScopes","userScopes","userCount"];
+  const headers = ["clientName","clientAppId","status","isMicrosoft","isThirdParty","isHomeTenant","isHidden","tags","adminScopes","userScopes","userCount"];
   const rows = items.map(x=>{
     const adminScopes = (x.adminGrants||[]).map(a=>`${a.resource}:${a.scope}`).join(";")
     const userScopes  = (x.userGrants ||[]).map(u=>`${u.resource}:${u.scope}`).join(";")
@@ -1181,6 +1196,7 @@ document.getElementById("exportCsv").addEventListener("click", () => {
       status: x.status||"",
       isMicrosoft: x.isMicrosoft ? "true" : "false",
       isThirdParty: x.isThirdParty ? "true" : "false",
+      isHomeTenant: x.isHomeTenant ? "true" : "false",
       isHidden: x.isHidden ? "true" : "false",
       tags,
       adminScopes,
