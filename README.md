@@ -18,7 +18,7 @@ PowerShell script that inventories Entra ID OAuth delegated consents, enriches t
 | Requirement | Notes |
 | --- | --- |
 | PowerShell 7.2+ (recommended) or Windows PowerShell 5.1 | Script was tested on PowerShell 7; older hosts should enforce TLS 1.2. |
-| Microsoft Graph PowerShell SDK | Install with `Install-Module Microsoft.Graph -Scope CurrentUser`. |
+| Microsoft Graph PowerShell SDK | Install with `Install-Module Microsoft.Graph.Authentication -Scope CurrentUser`. |
 | Graph permissions | The signed-in identity must be able to consent to **Directory.Read.All** and **Application.Read.All** (admin consent recommended). |
 | Internet access | Calls the Microsoft Graph `beta` and `v1.0` endpoints. |
 
@@ -27,8 +27,8 @@ PowerShell script that inventories Entra ID OAuth delegated consents, enriches t
 ## 🚀 Setup
 
 ```powershell
-Install-Module Microsoft.Graph -Scope CurrentUser
-Import-Module Microsoft.Graph
+Install-Module Microsoft.Graph.Authentication -Scope CurrentUser
+Import-Module Microsoft.Graph.Authentication
 # Optional: pick needed profile (beta is default when using Invoke-MgGraphRequest)
 # Select-MgProfile -Name beta
 Connect-MgGraph -Scopes 'Directory.Read.All','Application.Read.All'

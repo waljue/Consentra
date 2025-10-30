@@ -867,8 +867,10 @@ $htmlTemplate = @'
   .footer .sig{display:inline-flex;gap:8px;align-items:center}
   .icon{width:16px;height:16px;vertical-align:-3px;fill:#0e76a8}
   .header-grid{display:grid;gap:12px;}
-  .header-top{display:flex;align-items:center;gap:12px;}
-  .header-top h1{margin:0;font-size:16px;font-weight:600;}
+  .header-top{display:flex;align-items:flex-start;gap:12px;}
+  .brand-block{display:flex;flex-direction:column;gap:2px;}
+  .product-title{font-size:22px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--brand-2);}
+  .product-subtitle{font-size:15px;font-weight:500;color:var(--text);}
   .app-count{margin-left:auto;color:var(--muted);font-size:14px;}
   .app-count b{color:var(--text);font-size:16px;}
   .header-scopes,
@@ -880,7 +882,10 @@ $htmlTemplate = @'
 <header>
   <div class="wrap header-grid">
     <div class="header-top">
-      <h1>Entra ID – OAuth Consent Report</h1>
+      <div class="brand-block">
+        <div class="product-title">Consentra</div>
+        <div class="product-subtitle">Entra ID – OAuth Consent Report</div>
+      </div>
       <span class="app-count"><b id="tTotal">0</b> Enterprise apps</span>
     </div>
     <div class="header-scopes">
