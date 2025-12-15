@@ -499,6 +499,14 @@ function Is-LowImpactScopeSet {
     return $true
 }
 
+function Get-ScopeImpactLevel {
+    param([string]$Scope)
+    if ([string]::IsNullOrWhiteSpace($Scope)) { return 'unknown' }
+    if (Test-CriticalScope -Scope $Scope) { return 'critical' }
+    if ($lowImpactExact -contains $Scope) { return 'low' }
+    return 'elevated'
+}
+
 Initialize-GraphContext
 $tenantMetadata = Get-TenantMetadata
 $tenantDomains = $tenantMetadata.Domains
@@ -614,6 +622,7 @@ foreach ($group in $recordsByClient) {
             resource = $sample.ResourceName
             scope    = $sample.Scope
             type     = 'Admin'
+            impact   = Get-ScopeImpactLevel -Scope $sample.Scope
         }
     }
 
@@ -629,6 +638,7 @@ foreach ($group in $recordsByClient) {
             type     = 'User'
             users    = @($userUpns)
             userCount= @($userUpns).Count
+            impact   = Get-ScopeImpactLevel -Scope $sample.Scope
         }
     }
 
@@ -734,6 +744,43 @@ foreach ($spRaw in $allServicePrincipals) {
     }
 }
 
+        $impactSummary = @{
+            microsoft = [ordered]@{ critical = 0; elevated = 0; low = 0 }
+            thirdParty = [ordered]@{ critical = 0; elevated = 0; low = 0 }
+            homeTenant = [ordered]@{ critical = 0; elevated = 0; low = 0 }
+        }
+
+        foreach ($summary in $appSummaries) {
+            $vendorKey = if ($summary.isMicrosoft) {
+                'microsoft'
+            }
+            elseif ($summary.isThirdParty) {
+                'thirdParty'
+            }
+            elseif ($summary.isHomeTenant) {
+                'homeTenant'
+            }
+            else {
+                $null
+            }
+
+            if (-not $vendorKey) { continue }
+
+            $grants = @()
+            if ($summary.adminGrants) { $grants += $summary.adminGrants }
+            if ($summary.userGrants) { $grants += $summary.userGrants }
+
+            foreach ($grant in $grants) {
+                if (-not $grant) { continue }
+                $impactKey = switch ($grant.impact) {
+                    'critical' { 'critical' }
+                    'low' { 'low' }
+                    default { 'elevated' }
+                }
+                $impactSummary[$vendorKey][$impactKey]++
+            }
+        }
+
 $totalApps = @($appSummaries).Count
 $failCount = @($appSummaries | Where-Object status -eq 'fail').Count
 $passCount = @($appSummaries | Where-Object status -eq 'pass').Count
@@ -781,10 +828,12 @@ $appSummaries |
 $report = [pscustomobject]@{
     generatedAt = (Get-Date).ToString('s')
     totals      = @{ total=$totalApps; pass=$passCount; warn=$warnCount; fail=$failCount; microsoft=$microsoftCount; thirdParty=$thirdPartyCount; homeTenant=$homeTenantCount }
+    impactSummary = $impactSummary
     items       = $appSummaries
 }
 
 $json = $report | ConvertTo-Json -Depth 12
+$jsonSafe = $json.Replace('</script>','<\/script>').Replace('<','\u003c')
 $htmlTemplate = @'
 <!DOCTYPE html>
 <html lang="en">
@@ -856,8 +905,17 @@ $htmlTemplate = @'
   summary::-webkit-details-marker{display:none}
   .sec-title{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:#9aa3b2;margin:8px 0}
   .divider{height:1px;background:linear-gradient(90deg,transparent,#24424f 30%,#24424f 70%,transparent);margin:10px 0}
-  .consent-row{padding:6px 0}
+    .consent-row{padding:6px 0;border-left:3px solid transparent;border-radius:6px;margin:4px 0;padding-left:10px}
+    .consent-row[data-impact="critical"]{border-color:rgba(255,90,95,0.75);background:rgba(255,90,95,0.08)}
+    .consent-row[data-impact="elevated"]{border-color:rgba(255,209,102,0.7);background:rgba(255,209,102,0.08)}
+    .consent-row[data-impact="low"]{border-color:rgba(122,209,43,0.7);background:rgba(122,209,43,0.05)}
+    .consent-row[data-impact="unknown"]{border-color:rgba(148,163,184,0.45);background:rgba(148,163,184,0.06)}
   .pill{border-radius:999px;padding:2px 8px;border:1px solid #1a2a33;background:#0c1319;font-size:12px}
+    .scope-badge{display:inline-flex;align-items:center;font-weight:600;font-size:12px;border-radius:999px;padding:2px 8px;text-transform:none;border:1px solid transparent;margin-left:6px}
+    .scope-critical{background:rgba(255,90,95,0.18);border-color:rgba(255,90,95,0.55);color:#ffb9bc}
+    .scope-elevated{background:rgba(255,209,102,0.18);border-color:rgba(255,209,102,0.55);color:#ffe9ad}
+    .scope-low{background:rgba(122,209,43,0.18);border-color:rgba(122,209,43,0.55);color:#d9ffbd}
+    .scope-unknown{background:rgba(148,163,184,0.14);border-color:rgba(148,163,184,0.55);color:#e2e8f0}
   .footer{padding:20px;color:#9aa3b2;text-align:center;border-top:1px solid var(--line)}
     .status.microsoft{background:var(--microsoft)}
     .status.thirdparty{background:var(--thirdparty)}
@@ -876,6 +934,24 @@ $htmlTemplate = @'
   .header-scopes,
   .header-filters{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
   .header-controls{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:2px;}
+    .impact-section{display:flex;flex-direction:column;gap:10px;margin-top:10px}
+    .impact-heading{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:#9aa3b2}
+    .impact-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}
+    .impact-card{background:#0c1319;border:1px solid #1a2a33;border-radius:12px;padding:12px 14px;box-shadow:0 8px 18px rgba(0,0,0,0.25)}
+    .impact-card h5{margin:0;font-size:14px;color:#e9f0f3}
+    .impact-card[data-vendor="microsoft"]{border-color:rgba(77,163,255,0.45)}
+    .impact-card[data-vendor="thirdParty"]{border-color:rgba(255,177,71,0.45)}
+    .impact-card[data-vendor="homeTenant"]{border-color:rgba(0,194,168,0.45)}
+    .impact-total{font-size:12px;color:#7b8794;margin-top:2px;margin-bottom:10px}
+    .impact-bars{display:flex;flex-direction:column;gap:8px}
+    .impact-bar{display:grid;grid-template-columns:auto 1fr auto;gap:8px;align-items:center;font-size:12px}
+    .impact-bar-label{text-transform:uppercase;letter-spacing:.05em;font-weight:600;color:#9aa3b2}
+    .impact-bar-track{height:8px;background:#0a0f14;border-radius:999px;border:1px solid #1a2a33;overflow:hidden}
+    .impact-bar-fill{height:100%;border-radius:999px;transition:width .25s ease}
+    .impact-bar[data-level="critical"] .impact-bar-fill{background:var(--fail)}
+    .impact-bar[data-level="elevated"] .impact-bar-fill{background:var(--warn)}
+    .impact-bar[data-level="low"] .impact-bar-fill{background:var(--ok)}
+    .impact-count{font-variant-numeric:tabular-nums;font-weight:600}
 </style>
 </head>
 <body>
@@ -888,6 +964,10 @@ $htmlTemplate = @'
       </div>
       <span class="app-count"><b id="tTotal">0</b> Enterprise apps</span>
     </div>
+        <div class="impact-section" aria-label="Permission impact summary">
+            <div class="impact-heading">Permission impact by vendor</div>
+            <div class="impact-grid" id="impactGrid"></div>
+        </div>
     <div class="header-scopes">
       <span id="chipCritical" class="chip clickable" role="button" tabindex="0" aria-pressed="false"><span class="status fail"></span><b id="tFail">0</b> Critical scopes</span>
       <span id="chipElevated" class="chip clickable" role="button" tabindex="0" aria-pressed="false"><span class="status warn"></span><b id="tWarn">0</b> Elevated scopes</span>
@@ -918,13 +998,57 @@ $htmlTemplate = @'
   </span>
   <div>generated @ <span id="genAt"></span></div>
 </div>
+<script id="reportData" type="application/json">__REPORT_JSON__</script>
 <script>
-const report = __JSON__;
+const report = JSON.parse(document.getElementById("reportData").textContent);
 
 // --- State & Elements ---
 const state = { q:"", status:"all", consent:"any", vendor:"any", sort:"asc" };
 const $q = document.getElementById("q");
 const $list = document.getElementById("list");
+const $impactGrid = document.getElementById("impactGrid");
+
+// Utils & impact metadata
+function escapeHtml(s){ return String(s).replace(/[&<>"']/g,m=>({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#039;"}[m])) }
+function asArray(x){ return Array.isArray(x) ? x : (x ? [x] : []); }
+const scopeImpactMeta = {
+    critical: { key:"critical", className:"scope-critical", label:"Critical" },
+    elevated: { key:"elevated", className:"scope-elevated", label:"Elevated" },
+    low: { key:"low", className:"scope-low", label:"Low impact" },
+    unknown: { key:"unknown", className:"scope-unknown", label:"Unknown" }
+};
+function getImpactMeta(impact){
+    const key = (impact || "elevated").toLowerCase();
+    return scopeImpactMeta[key] || scopeImpactMeta.elevated;
+}
+const vendorImpactMeta = {
+    microsoft: { title: "Microsoft apps" },
+    thirdParty: { title: "3rd party apps" },
+    homeTenant: { title: "Home tenant apps" }
+};
+function renderImpactGrid(){
+    if(!$impactGrid) return;
+    const summary = report.impactSummary || {};
+    const cards = Object.entries(vendorImpactMeta).map(([vendorKey, meta])=>{
+        const counts = summary[vendorKey] || {};
+        const critical = Number(counts.critical) || 0;
+        const elevated = Number(counts.elevated) || 0;
+        const low = Number(counts.low) || 0;
+        const total = critical + elevated + low;
+        const max = Math.max(critical, elevated, low, 1);
+        const rows = [
+            { label: "High", level:"critical", value: critical },
+            { label: "Elevated", level:"elevated", value: elevated },
+            { label: "Low", level:"low", value: low }
+        ].map(row => {
+            const width = max === 0 ? 0 : Math.round((row.value / max) * 100);
+            return `<div class="impact-bar" data-level="${row.level}"><span class="impact-bar-label">${row.label}</span><div class="impact-bar-track"><div class="impact-bar-fill" style="width:${width}%"></div></div><span class="impact-count">${row.value}</span></div>`;
+        }).join("");
+        const totalLabel = total === 1 ? 'permission' : 'permissions';
+        return `<div class="impact-card" data-vendor="${vendorKey}"><h5>${meta.title}</h5><div class="impact-total">${total} ${totalLabel}</div><div class="impact-bars">${rows}</div></div>`;
+    }).join("");
+    $impactGrid.innerHTML = cards;
+}
 
 // Chips
 const $chipCritical = document.getElementById("chipCritical");
@@ -1016,6 +1140,7 @@ $chipHomeTenant.addEventListener("click", ()=> toggleVendorFilter("home"));
 });
 updateStatusChips();
 updateVendorChips();
+renderImpactGrid();
 
 function toggleConsentFilter(consent){
   state.consent = (state.consent === consent) ? "any" : consent;
@@ -1049,9 +1174,6 @@ $list.addEventListener("keydown", (event)=>{
   }
 });
 
-// Utils
-function escapeHtml(s){ return String(s).replace(/[&<>"']/g,m=>({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#039;"}[m])) }
-function asArray(x){ return Array.isArray(x) ? x : (x ? [x] : []); }
 function tagHtml(t){
   const label = escapeHtml(t);
   const lower = String(t).toLowerCase();
@@ -1127,11 +1249,19 @@ function render(){
   $visibleCount.textContent = items.length;
   $list.innerHTML = items.map(item => {
     const tags = (item.tags||[]).map(tag => tagHtml(tag)).join("");
-    const adminRows = (item.adminGrants||[]).map(a=>`<div class="consent-row"><span class="pill">Admin</span> ${escapeHtml(a.resource)} • <b>${escapeHtml(a.scope)}</b></div>`).join("");
-    const userRows  = (item.userGrants ||[]).map(u=>{
-      const arr = asArray(u.users);
-      return `<div class="consent-row"><span class="pill">User</span> ${escapeHtml(u.resource)} • <b>${escapeHtml(u.scope)}</b> • users: ${escapeHtml(arr.join(", "))}</div>`;
-    }).join("");
+        const adminRows = (item.adminGrants||[]).map(a=>{
+            const impact = getImpactMeta(a.impact);
+            const scopeBadge = `<span class="scope-badge ${impact.className}" title="${impact.label}">${escapeHtml(a.scope)}</span>`;
+            const rowTitle = impact.label ? ` title="${impact.label} scope"` : "";
+            return `<div class="consent-row" data-impact="${impact.key}"${rowTitle}><span class="pill">Admin</span> ${escapeHtml(a.resource)} • ${scopeBadge}</div>`;
+        }).join("");
+        const userRows  = (item.userGrants ||[]).map(u=>{
+            const arr = asArray(u.users);
+            const impact = getImpactMeta(u.impact);
+            const scopeBadge = `<span class="scope-badge ${impact.className}" title="${impact.label}">${escapeHtml(u.scope)}</span>`;
+            const rowTitle = impact.label ? ` title="${impact.label} scope"` : "";
+            return `<div class="consent-row" data-impact="${impact.key}"${rowTitle}><span class="pill">User</span> ${escapeHtml(u.resource)} • ${scopeBadge} • users: ${escapeHtml(arr.join(", "))}</div>`;
+        }).join("");
     const hasAdmin = !!adminRows, hasUser = !!userRows;
     const sections = [
       hasAdmin ? `<div class="sec-title">Admin Consents</div>${adminRows}` : "",
@@ -1161,26 +1291,26 @@ function render(){
           <div><span class="meta-label">SP tags</span><span class="meta-value">${spTagsEsc}</span></div>
         </div>
         <div class="divider"></div>`;
-    return `
-      <div class="card">
-        <div class="item">
-          <span class="status ${item.status}"></span>
-          <div>
-            <h4>${escapeHtml(item.clientName||"(no name)")}</h4>
-            <div class="meta">${escapeHtml(item.clientAppId||"")} • ${scopeArr.length} scope(s)</div>
-            <div class="tags">${tags}</div>
-          </div>
-          <div class="actions">
-            <button onclick='copyJson(${JSON.stringify(item).replace(/</g,"\\u003c")})' title="Copy JSON">Copy</button>
-          </div>
-        </div>
+        return `
+            <div class="card">
+                <div class="item">
+                    <span class="status ${item.status}"></span>
+                    <div>
+                        <h4>${escapeHtml(item.clientName||"(no name)")}</h4>
+                        <div class="meta">${escapeHtml(item.clientAppId||"")} • ${scopeArr.length} scope(s)</div>
+                        <div class="tags">${tags}</div>
+                    </div>
+                    <div class="actions">
+                        <button onclick='copyJson(${JSON.stringify(item).replace(/</g,"\\u003c")})' title="Copy JSON">Copy</button>
+                    </div>
+                </div>
         <details>
           <summary>Details</summary>
           <div style="padding:12px 14px">
-            ${metadataBlock}${sections}${none}
-          </div>
-        </details>
-      </div>`;
+                        ${metadataBlock}${sections}${none}
+                    </div>
+                </details>
+            </div>`;
   }).join("");
 }
 
@@ -1222,9 +1352,8 @@ render();
 </html>
 '@
 
-$escapedJson = $json.Replace('</script>','<\/script>')
-$html = $htmlTemplate
-$html = $html -replace '__JSON__', $escapedJson
+$jsonSafe = $json.Replace('</script>','<\/script>')
+$html = $htmlTemplate.Replace('__REPORT_JSON__', $jsonSafe)
 
 $ts = Get-Date -Format "yyyyMMdd_HHmm"
 $htmlPath = Join-Path $outDir ("OAuth2_Consent_Report_$ts.html")
