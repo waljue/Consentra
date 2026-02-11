@@ -9,7 +9,8 @@
 
 [CmdletBinding()]
 param(
-    [string]$AppNameContains
+    [string]$AppNameContains,
+    [switch]$VerboseLogging
 )
 
 Set-StrictMode -Version Latest
@@ -60,6 +61,55 @@ $script:KnownMicrosoftAppIds = @(
     'ea66284f-8898-44f3-b935-d182ea20816c'
 )
 #endregion
+
+$script:LogPath = Join-Path -Path $PSScriptRoot -ChildPath 'consentra.log'
+$script:DebugEnabled = $false
+$script:ShowLogs = $false
+$script:ProgressStep = 0
+$script:ProgressTotal = 10
+
+function Initialize-Progress {
+    param([int]$TotalSteps = 10)
+    $script:ProgressStep = 0
+    $script:ProgressTotal = $TotalSteps
+    Write-Progress -Activity 'Consentra report' -Status 'Starting...' -PercentComplete 0
+}
+
+function Update-Progress {
+    param([Parameter(Mandatory)][string]$Message)
+    $script:ProgressStep = [Math]::Min($script:ProgressStep + 1, $script:ProgressTotal)
+    $percent = if ($script:ProgressTotal -gt 0) { [Math]::Round(($script:ProgressStep / $script:ProgressTotal) * 100) } else { 0 }
+    Write-Host ("[{0}/{1}] {2}" -f $script:ProgressStep, $script:ProgressTotal, $Message)
+    Write-Progress -Activity 'Consentra report' -Status $Message -PercentComplete $percent
+}
+
+function Complete-Progress {
+    Write-Progress -Activity 'Consentra report' -Completed
+}
+
+function Write-Log {
+    param(
+        [Parameter(Mandatory)][string]$Message,
+        [ValidateSet('INFO','WARN','ERROR','DEBUG')][string]$Level = 'INFO',
+        [object]$Data
+    )
+
+    if ($Level -eq 'DEBUG' -and -not $script:DebugEnabled) { return }
+
+    $timestamp = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss.fff')
+    $line = "[$timestamp][$Level] $Message"
+    if ($Data) {
+        try {
+            $json = $Data | ConvertTo-Json -Depth 6 -Compress
+            $line = "$line | data=$json"
+        } catch {
+            $line = "$line | data=$($Data.ToString())"
+        }
+    }
+
+    if ($script:ShowLogs) { Write-Host $line }
+    try { Add-Content -Path $script:LogPath -Value $line } catch { }
+}
 
 function Get-EffectiveString {
     param([string]$Value)
@@ -203,7 +253,7 @@ function Get-ServicePrincipalMetadata {
 
     $results = @{}
     $batchEndpoint = 'https://graph.microsoft.com/beta/$batch'
-    $select = 'id,appId,displayName,appOwnerOrganizationId,publisherName,tags,servicePrincipalType,servicePrincipalNames,verifiedPublisher'
+    $select = 'id,appId,displayName,appOwnerOrganizationId,publisherName,tags,servicePrincipalType,servicePrincipalNames,verifiedPublisher,notes,description,preferredSingleSignOnMode,replyUrls'
     $batchSize = 20
 
     for ($index = 0; $index -lt $idList.Count; $index += $batchSize) {
@@ -231,6 +281,29 @@ function Get-ServicePrincipalMetadata {
     return $results
 }
 
+function Get-SsoState {
+    param(
+        [string[]]$ReplyUrls,
+        [string]$PreferredSingleSignOnMode
+    )
+    if (-not [string]::IsNullOrWhiteSpace($PreferredSingleSignOnMode)) {
+        $mode = $PreferredSingleSignOnMode.Trim().ToLowerInvariant()
+        if ($mode -like '*saml*') { return 'SAML' }
+        if ($mode -like '*oidc*' -or $mode -like '*openidconnect*') { return 'OpenID Connect' }
+        switch ($mode) {
+            'password' { return 'Password (legacy)' }
+            'notsupported' { return 'Disabled' }
+            'unknownfuturevalue' { return 'Unknown' }
+            default { return ($PreferredSingleSignOnMode) }
+        }
+    }
+
+    $replyUris = @($ReplyUrls | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($replyUris.Count -gt 0) { return 'OpenID Connect' }
+
+    return 'Disabled'
+}
+
 function Test-ServicePrincipalHidden {
     param([string[]]$Tags)
     if (-not $Tags) { return $false }
@@ -246,14 +319,119 @@ function Test-ServicePrincipalHidden {
 }
 
 function Get-AllServicePrincipals {
-    $select = 'id,appId,displayName,appOwnerOrganizationId,publisherName,publisherDomain,tags,servicePrincipalNames,servicePrincipalType,verifiedPublisher'
-    $baseUri = "https://graph.microsoft.com/beta/servicePrincipals?\$count=true&\$top=999&includeHidden=true&\$select=$select"
+    $select = 'id,appId,displayName,appOwnerOrganizationId,publisherName,publisherDomain,tags,servicePrincipalNames,servicePrincipalType,verifiedPublisher,notes,description,preferredSingleSignOnMode,replyUrls'
+    $baseUri = "https://graph.microsoft.com/beta/servicePrincipals?`$count=true&`$top=999&includeHidden=true&`$select=$select"
     try {
         return Invoke-GraphPaged -Uri $baseUri
     } catch {
         Write-Warning ("Unable to include hidden service principals via includeHidden=true: {0}" -f $_.Exception.Message)
-        $fallbackUri = "https://graph.microsoft.com/beta/servicePrincipals?\$count=true&\$top=999&\$select=$select"
+    $fallbackUri = "https://graph.microsoft.com/beta/servicePrincipals?`$count=true&`$top=999&`$select=$select"
         return Invoke-GraphPaged -Uri $fallbackUri
+    }
+}
+
+function Get-AllApplications {
+    $select = 'id,appId,displayName,description,web'
+    $baseUri = "https://graph.microsoft.com/beta/applications?`$count=true&`$top=999&`$select=$select"
+    return Invoke-GraphPaged -Uri $baseUri
+}
+
+function Get-StaleAppIndicators {
+    $appIds = [System.Collections.Generic.HashSet[string]]::new()
+    $spIds = [System.Collections.Generic.HashSet[string]]::new()
+    $debugLogged = 0
+    $sampleLogged = 0
+    $endpoints = @(
+        'https://graph.microsoft.com/beta/directory/recommendations/a65f6b72-abef-4f0b-88d6-3256be9a72d1_staleApps/impactedResources'
+    )
+
+    foreach ($endpoint in $endpoints) {
+        try {
+            $results = Invoke-GraphPaged -Uri $endpoint
+        } catch {
+            continue
+        }
+
+        Write-Log -Level 'DEBUG' -Message 'Stale app endpoint returned items.' -Data @{ endpoint = $endpoint; count = @($results).Count }
+
+        foreach ($item in $results) {
+            $impactType = Get-GraphResponseProperty -Response $item -PropertyName 'impactType'
+            $impactCategory = Get-GraphResponseProperty -Response $item -PropertyName 'impactCategory'
+            $category = Get-GraphResponseProperty -Response $item -PropertyName 'category'
+            $indicator = @($impactType, $impactCategory, $category) | Where-Object { $_ } | Select-Object -First 1
+
+            $shouldProcess = $endpoint -like '*recommendations/*_staleApps/impactedResources' -or
+                             $endpoint -like '*staleApps' -or
+                             ($indicator -and ($indicator.ToString() -match 'stale'))
+            if ($shouldProcess) {
+                $appId = Get-GraphResponseProperty -Response $item -PropertyName 'appId'
+                $resourceId = Get-GraphResponseProperty -Response $item -PropertyName 'resourceId'
+                $resourceType = Get-GraphResponseProperty -Response $item -PropertyName 'resourceType'
+                $subjectId = Get-GraphResponseProperty -Response $item -PropertyName 'subjectId'
+                $id = Get-GraphResponseProperty -Response $item -PropertyName 'id'
+
+                $nested = @(
+                    (Get-GraphResponseProperty -Response $item -PropertyName 'resource'),
+                    (Get-GraphResponseProperty -Response $item -PropertyName 'resourceInfo'),
+                    (Get-GraphResponseProperty -Response $item -PropertyName 'resourceMetadata'),
+                    (Get-GraphResponseProperty -Response $item -PropertyName 'resourceDetails'),
+                    (Get-GraphResponseProperty -Response $item -PropertyName 'recommendationResource'),
+                    (Get-GraphResponseProperty -Response $item -PropertyName 'impactedResource'),
+                    (Get-GraphResponseProperty -Response $item -PropertyName 'targetResource')
+                ) | Where-Object { $_ }
+
+                foreach ($node in $nested) {
+                    if (-not $appId) { $appId = Get-GraphResponseProperty -Response $node -PropertyName 'appId' }
+                    if (-not $resourceId) { $resourceId = Get-GraphResponseProperty -Response $node -PropertyName 'resourceId' }
+                    if (-not $resourceId) { $resourceId = Get-GraphResponseProperty -Response $node -PropertyName 'id' }
+                    if (-not $resourceType) { $resourceType = Get-GraphResponseProperty -Response $node -PropertyName 'resourceType' }
+                    if (-not $resourceType) { $resourceType = Get-GraphResponseProperty -Response $node -PropertyName 'type' }
+                    if ($appId -or $resourceId) { break }
+                }
+
+                if (-not $appId -and $resourceType -and $resourceType.ToString().ToLowerInvariant() -eq 'app') {
+                    if ($subjectId) { $appId = $subjectId }
+                    elseif ($id) { $appId = $id }
+                }
+
+                if (-not $appId) {
+                    $portalUrl = Get-GraphResponseProperty -Response $item -PropertyName 'portalUrl'
+                    if ($portalUrl -and $portalUrl -match 'appId/([0-9a-fA-F-]{36})') {
+                        $appId = $Matches[1]
+                    }
+                }
+
+                if ($appId) { [void]$appIds.Add($appId.ToString()) }
+
+                if ($VerboseLogging -and $sampleLogged -lt 5) {
+                    $sampleLogged++
+                    Write-Log -Level 'DEBUG' -Message 'Stale app sample item.' -Data @{ resourceType = $resourceType; subjectId = $subjectId; appId = $appId; resourceId = $resourceId; id = $id }
+                }
+
+                $resourceTypeText = if ($resourceType) { $resourceType.ToString().ToLowerInvariant() } else { '' }
+                if (-not $appId -and $resourceId) {
+                    if ($resourceTypeText -match 'application') {
+                        [void]$appIds.Add($resourceId.ToString())
+                    } else {
+                        [void]$spIds.Add($resourceId.ToString())
+                    }
+                }
+
+                if ($id -and -not $spIds.Contains($id.ToString())) { [void]$spIds.Add($id.ToString()) }
+
+                if (-not $appId -and -not $resourceId -and $debugLogged -lt 3) {
+                    $debugLogged++
+                    Write-Log -Level 'DEBUG' -Message 'Stale app item missing IDs.' -Data @{ keys = @($item.PSObject.Properties.Name); item = $item }
+                }
+            }
+        }
+
+        if ($appIds.Count -gt 0 -or $spIds.Count -gt 0) { break }
+    }
+
+    return [pscustomobject]@{
+        AppIds = $appIds
+        ServicePrincipalIds = $spIds
     }
 }
 
@@ -298,11 +476,23 @@ function New-ServicePrincipalProfile {
         $verifiedPublisherId = Get-EffectiveString (Get-GraphResponseProperty -Response $Source -PropertyName 'VerifiedPublisherId')
     }
 
+    $notesValue = Get-EffectiveString (Get-GraphResponseProperty -Response $Source -PropertyName 'notes')
+    if (-not $notesValue) {
+        $notesValue = Get-EffectiveString (Get-GraphResponseProperty -Response $Source -PropertyName 'description')
+    }
+
+    $replyUrlsRaw = Get-GraphResponseProperty -Response $Source -PropertyName 'replyUrls'
+    $replyUrls = @()
+    if ($replyUrlsRaw) { $replyUrls = @($replyUrlsRaw | ForEach-Object { $_.ToString() }) }
+
     $profile = [ordered]@{
         Id                    = Get-GraphResponseProperty -Response $Source -PropertyName 'id'
         AppId                 = Get-GraphResponseProperty -Response $Source -PropertyName 'appId'
         Name                  = Get-GraphResponseProperty -Response $Source -PropertyName 'displayName'
         Tags                  = $tags
+        Notes                 = $notesValue
+        PreferredSSOMode      = Get-EffectiveString (Get-GraphResponseProperty -Response $Source -PropertyName 'preferredSingleSignOnMode')
+        ReplyUrls             = $replyUrls
         Publisher             = Get-EffectiveString (Get-GraphResponseProperty -Response $Source -PropertyName 'publisherName')
         PublisherDomain       = Get-EffectiveString (Get-GraphResponseProperty -Response $Source -PropertyName 'publisherDomain')
         AppOwnerOrgId         = Get-EffectiveString (Get-GraphResponseProperty -Response $Source -PropertyName 'appOwnerOrganizationId')
@@ -327,7 +517,7 @@ function Merge-ServicePrincipalProfile {
     $profile = New-ServicePrincipalProfile -Source $Source
     if (-not $profile) { return }
 
-    foreach ($key in 'Name','AppId','AppOwnerOrgId','ServicePrincipalType') {
+    foreach ($key in 'Name','AppId','AppOwnerOrgId','ServicePrincipalType','Notes','PreferredSSOMode','ReplyUrls') {
         if ($profile[$key]) { $Target[$key] = $profile[$key] }
     }
 
@@ -341,10 +531,14 @@ function Merge-ServicePrincipalProfile {
 
 function Get-MicrosoftVendorInfo {
     param(
-        [hashtable]$Profile,
+        [object]$Profile,
         [string[]]$TenantDomains,
         [string]$TenantDisplayName
     )
+
+    if (-not $Profile) {
+        $Profile = [ordered]@{}
+    }
 
     $vendorInfo = [ordered]@{
         IsMicrosoft                          = $false
@@ -508,12 +702,21 @@ function Get-ScopeImpactLevel {
 }
 
 Initialize-GraphContext
+$script:DebugEnabled = [bool]$VerboseLogging -or ($VerbosePreference -ne 'SilentlyContinue')
+$script:ShowLogs = $script:DebugEnabled
+Initialize-Progress -TotalSteps 10
+Update-Progress -Message 'Initialize Graph connection'
+Write-Log -Message 'Graph context initialized.'
 $tenantMetadata = Get-TenantMetadata
 $tenantDomains = $tenantMetadata.Domains
 $tenantDisplayName = $tenantMetadata.DisplayName
+Update-Progress -Message 'Load tenant metadata'
+Write-Log -Message 'Tenant metadata loaded.' -Data @{ displayName = $tenantDisplayName; domains = $tenantDomains }
 
 $grantUri = 'https://graph.microsoft.com/beta/oauth2PermissionGrants?$count=true&$top=999'
 $grants = Invoke-GraphPaged -Uri $grantUri
+Update-Progress -Message 'Load OAuth2 grants'
+Write-Log -Message 'OAuth grants retrieved.' -Data @{ count = @($grants).Count }
 if (-not $grants) {
     Write-Host 'No oauth2PermissionGrants found.'
     return
@@ -529,6 +732,8 @@ foreach ($grant in $grants) {
 }
 
 $directoryObjects = Get-DirectoryObjectsByIds -Ids @($clientIds + $resourceIds + $userIds)
+Update-Progress -Message 'Load directory objects'
+Write-Log -Message 'Directory objects retrieved.' -Data @{ count = @($directoryObjects).Count }
 $servicePrincipals = @{}
 $users = @{}
 
@@ -553,8 +758,11 @@ $metadataById = @{}
 if ($allServicePrincipalIds) {
     try {
         $metadataById = Get-ServicePrincipalMetadata -Ids $allServicePrincipalIds
+    Update-Progress -Message 'Load service principal metadata'
+        Write-Log -Message 'Service principal metadata retrieved.' -Data @{ count = @($metadataById.Keys).Count }
     } catch {
         Write-Warning ("Unable to fetch extended service principal metadata: {0}" -f $_.Exception.Message)
+        Write-Log -Level 'WARN' -Message 'Unable to fetch extended service principal metadata.' -Data $_.Exception.Message
         $metadataById = @{}
     }
 }
@@ -600,77 +808,143 @@ $expandedGrants = foreach ($grant in $grants) {
     }
 }
 
+$applicationsByAppId = @{}
+try {
+    $allApplications = Get-AllApplications
+    Update-Progress -Message 'Load app registrations'
+    Write-Log -Message 'Applications list retrieved.' -Data @{ count = @($allApplications).Count }
+    foreach ($app in $allApplications) {
+        if ($app.appId) { $applicationsByAppId[$app.appId] = $app }
+    }
+} catch {
+    Write-Warning ("Unable to retrieve applications list: {0}" -f $_.Exception.Message)
+    Write-Log -Level 'WARN' -Message 'Unable to retrieve applications list.' -Data $_.Exception.Message
+    $applicationsByAppId = @{}
+}
+
+$staleIndicators = $null
+try {
+    $staleIndicators = Get-StaleAppIndicators
+    Update-Progress -Message 'Fetch stale apps (recommendation)'
+    Write-Log -Message 'Stale app indicators retrieved.' -Data @{ appIds = $staleIndicators.AppIds.Count; spIds = $staleIndicators.ServicePrincipalIds.Count }
+} catch {
+    Write-Log -Level 'WARN' -Message 'Unable to retrieve stale app indicators.' -Data $_.Exception.Message
+}
+$staleAppIds = if ($staleIndicators) { $staleIndicators.AppIds } else { [System.Collections.Generic.HashSet[string]]::new() }
+$staleSpIds = if ($staleIndicators) { $staleIndicators.ServicePrincipalIds } else { [System.Collections.Generic.HashSet[string]]::new() }
+if (-not $staleAppIds) { $staleAppIds = [System.Collections.Generic.HashSet[string]]::new() }
+if (-not $staleSpIds) { $staleSpIds = [System.Collections.Generic.HashSet[string]]::new() }
+
 $recordsByClient = $expandedGrants | Group-Object ClientId
 $appSummaries = @()
+Update-Progress -Message 'Build app summaries'
 foreach ($group in $recordsByClient) {
-    $recordsForClient = $group.Group
-    $clientProfile = $servicePrincipals[$group.Name]
-    $allScopes = @(($recordsForClient | Select-Object -Expand Scope) | Sort-Object -Unique)
-
-    $isCritical = $false
-    foreach ($scope in $allScopes) {
-        if (Test-CriticalScope -Scope $scope) { $isCritical = $true; break }
-    }
-    $status = if ($isCritical) { 'fail' } elseif (Is-LowImpactScopeSet -Scopes $allScopes) { 'pass' } else { 'warn' }
-
-    $administratorGrants = @()
-    $userGrants = @()
-
-    foreach ($adminGroup in (($recordsForClient | Where-Object { $_.ConsentType -eq 'AllPrincipals' }) | Group-Object ResourceName, Scope)) {
-        $sample = $adminGroup.Group[0]
-        $administratorGrants += [pscustomobject]@{
-            resource = $sample.ResourceName
-            scope    = $sample.Scope
-            type     = 'Admin'
-            impact   = Get-ScopeImpactLevel -Scope $sample.Scope
+    try {
+        $recordsForClient = $group.Group
+        $clientProfile = $servicePrincipals[$group.Name]
+        if (-not $clientProfile) {
+            Write-Log -Level 'WARN' -Message 'Client profile missing, using fallback.' -Data @{ clientId = $group.Name }
+            $clientProfile = [ordered]@{
+                Id                = $group.Name
+                Name              = $group.Name
+                AppId             = $null
+                Tags              = @()
+                Notes             = $null
+                ReplyUrls         = @()
+                PreferredSSOMode  = $null
+                ServicePrincipalNames = @()
+            }
         }
-    }
-
-    foreach ($userGroup in (($recordsForClient | Where-Object { $_.ConsentType -eq 'Principal' }) | Group-Object ResourceName, Scope)) {
-        $sample = $userGroup.Group[0]
-        $userUpns = $userGroup.Group | Where-Object { $_.PrincipalId } | ForEach-Object {
-            if ($users.ContainsKey($_.PrincipalId)) { $users[$_.PrincipalId].UPN }
-        } | Where-Object { $_ } | Sort-Object -Unique
-        $userUpns = @($userUpns)
-        $userGrants += [pscustomobject]@{
-            resource = $sample.ResourceName
-            scope    = $sample.Scope
-            type     = 'User'
-            users    = @($userUpns)
-            userCount= @($userUpns).Count
-            impact   = Get-ScopeImpactLevel -Scope $sample.Scope
+        $appInfo = $null
+        if ($clientProfile.AppId -and $applicationsByAppId.ContainsKey($clientProfile.AppId)) {
+            $appInfo = $applicationsByAppId[$clientProfile.AppId]
         }
-    }
+        $appDescription = if ($appInfo) { Get-EffectiveString (Get-GraphResponseProperty -Response $appInfo -PropertyName 'description') }
+        if (-not $appDescription) { $appDescription = $clientProfile.Notes }
+        $redirectUris = @()
+        if ($appInfo) {
+            $webInfo = Get-GraphResponseProperty -Response $appInfo -PropertyName 'web'
+            $redirectUrisRaw = if ($webInfo) { Get-GraphResponseProperty -Response $webInfo -PropertyName 'redirectUris' }
+            if ($redirectUrisRaw) { $redirectUris = @($redirectUrisRaw) }
+        }
+        $replyUrls = if ($clientProfile.ReplyUrls) { $clientProfile.ReplyUrls } else { $redirectUris }
+        $allScopes = @(($recordsForClient | Select-Object -Expand Scope) | Sort-Object -Unique)
 
-    $vendorInfo = Get-MicrosoftVendorInfo -Profile $clientProfile -TenantDomains $tenantDomains -TenantDisplayName $tenantDisplayName
-    $isHiddenApp = Test-ServicePrincipalHidden -Tags $clientProfile.Tags
-    $userScopeCount = @($userGrants | Select-Object -ExpandProperty scope -Unique).Count
-    $userCount = @($userGrants | ForEach-Object { $_.users } | Where-Object { $_ } | Select-Object -Unique).Count
+        $isCritical = $false
+        foreach ($scope in $allScopes) {
+            if (Test-CriticalScope -Scope $scope) { $isCritical = $true; break }
+        }
+        $status = if ($isCritical) { 'fail' } elseif (Is-LowImpactScopeSet -Scopes $allScopes) { 'pass' } else { 'warn' }
 
-    $tags = @()
-    if ($vendorInfo.IsMicrosoft) { $tags += 'Microsoft' }
-    elseif ($vendorInfo.IsThirdParty) { $tags += '3rd Party' }
-    elseif ($vendorInfo.IsHomeTenant) { $tags += 'Home Tenant' }
-    if ($isHiddenApp) { $tags += 'Hidden' }
-    if ($administratorGrants) { $tags += 'Admin Consent' }
-    if ($userGrants) { $tags += 'User Consent' }
-    $tags += "user-perm: $userScopeCount"
-    $tags += "user-count: $userCount"
+        $administratorGrants = @()
+        $userGrants = @()
 
-    $appSummaries += [pscustomobject]@{
-        clientId      = $group.Name
-        clientName    = $clientProfile.Name
-        clientAppId   = $clientProfile.AppId
-        status        = $status
-        tags          = $tags
-        isMicrosoft   = $vendorInfo.IsMicrosoft
-        isThirdParty  = $vendorInfo.IsThirdParty
-        isHomeTenant  = $vendorInfo.IsHomeTenant
-        isHidden      = $isHiddenApp
-        vendorInfo    = $vendorInfo
-        adminGrants   = $administratorGrants
-        userGrants    = $userGrants
-        allScopes     = $allScopes
+        foreach ($adminGroup in (($recordsForClient | Where-Object { $_.ConsentType -eq 'AllPrincipals' }) | Group-Object ResourceName, Scope)) {
+            $sample = $adminGroup.Group[0]
+            $administratorGrants += [pscustomobject]@{
+                resource = $sample.ResourceName
+                scope    = $sample.Scope
+                type     = 'Admin'
+                impact   = Get-ScopeImpactLevel -Scope $sample.Scope
+            }
+        }
+
+        foreach ($userGroup in (($recordsForClient | Where-Object { $_.ConsentType -eq 'Principal' }) | Group-Object ResourceName, Scope)) {
+            $sample = $userGroup.Group[0]
+            $userUpns = $userGroup.Group | Where-Object { $_.PrincipalId } | ForEach-Object {
+                if ($users.ContainsKey($_.PrincipalId)) { $users[$_.PrincipalId].UPN }
+            } | Where-Object { $_ } | Sort-Object -Unique
+            $userUpns = @($userUpns)
+            $userGrants += [pscustomobject]@{
+                resource = $sample.ResourceName
+                scope    = $sample.Scope
+                type     = 'User'
+                users    = @($userUpns)
+                userCount= @($userUpns).Count
+                impact   = Get-ScopeImpactLevel -Scope $sample.Scope
+            }
+        }
+
+        $vendorInfo = Get-MicrosoftVendorInfo -Profile $clientProfile -TenantDomains $tenantDomains -TenantDisplayName $tenantDisplayName
+        $isHiddenApp = Test-ServicePrincipalHidden -Tags $clientProfile.Tags
+        $isStaleApp = $false
+        if ($clientProfile.AppId -and $staleAppIds.Contains($clientProfile.AppId)) { $isStaleApp = $true }
+        elseif ($group.Name -and $staleSpIds.Contains($group.Name)) { $isStaleApp = $true }
+        $userScopeCount = @($userGrants | Select-Object -ExpandProperty scope -Unique).Count
+        $userCount = @($userGrants | ForEach-Object { $_.users } | Where-Object { $_ } | Select-Object -Unique).Count
+
+        $tags = @()
+        if ($vendorInfo.IsMicrosoft) { $tags += 'Microsoft' }
+        elseif ($vendorInfo.IsThirdParty) { $tags += '3rd Party' }
+        elseif ($vendorInfo.IsHomeTenant) { $tags += 'Home Tenant' }
+        if ($isHiddenApp) { $tags += 'Hidden' }
+        if ($isStaleApp) { $tags += 'staleApps' }
+        if ($administratorGrants) { $tags += 'Admin Consent' }
+        if ($userGrants) { $tags += 'User Consent' }
+        $tags += "user-perm: $userScopeCount"
+        $tags += "user-count: $userCount"
+
+        $appSummaries += [pscustomobject]@{
+            clientId      = $group.Name
+            clientName    = $clientProfile.Name
+            clientAppId   = $clientProfile.AppId
+            notes         = $appDescription
+            ssoState      = Get-SsoState -ReplyUrls $replyUrls -PreferredSingleSignOnMode $clientProfile.PreferredSSOMode
+            staleApp      = $isStaleApp
+            status        = $status
+            tags          = $tags
+            isMicrosoft   = $vendorInfo.IsMicrosoft
+            isThirdParty  = $vendorInfo.IsThirdParty
+            isHomeTenant  = $vendorInfo.IsHomeTenant
+            isHidden      = $isHiddenApp
+            vendorInfo    = $vendorInfo
+            adminGrants   = $administratorGrants
+            userGrants    = $userGrants
+            allScopes     = $allScopes
+        }
+    } catch {
+        Write-Log -Level 'ERROR' -Message 'Failed to build summary for client.' -Data @{ clientId = $group.Name; error = $_.Exception.Message; line = $_.InvocationInfo.ScriptLineNumber }
+        throw
     }
 }
 
@@ -682,6 +956,7 @@ foreach ($summary in $appSummaries) {
 $allServicePrincipals = @()
 try {
     $allServicePrincipals = Get-AllServicePrincipals
+    Update-Progress -Message 'Enrich with all enterprise apps'
 } catch {
     Write-Warning ("Unable to retrieve complete service principal list: {0}" -f $_.Exception.Message)
     $allServicePrincipals = @()
@@ -703,6 +978,9 @@ foreach ($spRaw in $allServicePrincipals) {
 
     $vendorInfo = Get-MicrosoftVendorInfo -Profile $profile -TenantDomains $tenantDomains -TenantDisplayName $tenantDisplayName
     $isHiddenSp = Test-ServicePrincipalHidden -Tags $profile.Tags
+    $isStaleApp = $false
+    if ($profile.AppId -and $staleAppIds.Contains($profile.AppId)) { $isStaleApp = $true }
+    elseif ($spId -and $staleSpIds.Contains($spId)) { $isStaleApp = $true }
 
     if ($summariesByClientId.ContainsKey($spId)) {
         $summary = $summariesByClientId[$spId]
@@ -715,6 +993,8 @@ foreach ($spRaw in $allServicePrincipals) {
         if ($vendorInfo.IsMicrosoft) { $summary.tags += 'Microsoft' }
         elseif ($vendorInfo.IsThirdParty) { $summary.tags += '3rd Party' }
         elseif ($vendorInfo.IsHomeTenant) { $summary.tags += 'Home Tenant' }
+        if ($isStaleApp -and ($summary.tags -notcontains 'staleApps')) { $summary.tags += 'staleApps' }
+        $summary.staleApp = $isStaleApp
     } else {
         $nameFallback = if ($profile.Name) { $profile.Name } elseif ($profile.AppId) { $profile.AppId } else { $spId }
         $tags = @()
@@ -722,12 +1002,30 @@ foreach ($spRaw in $allServicePrincipals) {
         elseif ($vendorInfo.IsThirdParty) { $tags += '3rd Party' }
         elseif ($vendorInfo.IsHomeTenant) { $tags += 'Home Tenant' }
         if ($isHiddenSp) { $tags += 'Hidden' }
+        if ($isStaleApp) { $tags += 'staleApps' }
         $tags += 'No OAuth grants'
+
+        $appInfo = $null
+        if ($profile.AppId -and $applicationsByAppId.ContainsKey($profile.AppId)) {
+            $appInfo = $applicationsByAppId[$profile.AppId]
+        }
+        $appDescription = if ($appInfo) { Get-EffectiveString (Get-GraphResponseProperty -Response $appInfo -PropertyName 'description') }
+        if (-not $appDescription) { $appDescription = $profile.Notes }
+        $redirectUris = @()
+        if ($appInfo) {
+            $webInfo = Get-GraphResponseProperty -Response $appInfo -PropertyName 'web'
+            $redirectUrisRaw = if ($webInfo) { Get-GraphResponseProperty -Response $webInfo -PropertyName 'redirectUris' }
+            if ($redirectUrisRaw) { $redirectUris = @($redirectUrisRaw) }
+        }
+        $replyUrls = if ($profile.ReplyUrls) { $profile.ReplyUrls } else { $redirectUris }
 
         $newSummary = [pscustomobject]@{
             clientId     = $spId
             clientName   = $nameFallback
             clientAppId  = $profile.AppId
+            notes        = $appDescription
+            ssoState     = Get-SsoState -ReplyUrls $replyUrls -PreferredSingleSignOnMode $profile.PreferredSSOMode
+            staleApp     = $isStaleApp
             status       = 'pass'
             tags         = $tags
             isMicrosoft  = $vendorInfo.IsMicrosoft
@@ -743,6 +1041,66 @@ foreach ($spRaw in $allServicePrincipals) {
         $summariesByClientId[$spId] = $newSummary
     }
 }
+
+$servicePrincipalAppIds = [System.Collections.Generic.HashSet[string]]::new()
+foreach ($profile in $servicePrincipals.Values) {
+    if ($profile.AppId) { [void]$servicePrincipalAppIds.Add($profile.AppId) }
+}
+
+foreach ($appId in $applicationsByAppId.Keys) {
+    if ($servicePrincipalAppIds.Contains($appId)) { continue }
+
+    $appInfo = $applicationsByAppId[$appId]
+    $appDescription = Get-EffectiveString (Get-GraphResponseProperty -Response $appInfo -PropertyName 'description')
+    $redirectUris = @()
+    $webInfo = Get-GraphResponseProperty -Response $appInfo -PropertyName 'web'
+    $redirectUrisRaw = if ($webInfo) { Get-GraphResponseProperty -Response $webInfo -PropertyName 'redirectUris' }
+    if ($redirectUrisRaw) { $redirectUris = @($redirectUrisRaw) }
+
+    $appProfile = [ordered]@{
+        AppId                 = $appId
+        Name                  = Get-EffectiveString (Get-GraphResponseProperty -Response $appInfo -PropertyName 'displayName')
+        Tags                  = @()
+        Publisher             = $null
+        PublisherDomain       = $null
+        AppOwnerOrgId         = $null
+        VerifiedPublisherName = $null
+        VerifiedPublisherId   = $null
+        ServicePrincipalNames = @()
+        ServicePrincipalType  = $null
+    }
+
+    $vendorInfo = Get-MicrosoftVendorInfo -Profile $appProfile -TenantDomains $tenantDomains -TenantDisplayName $tenantDisplayName
+    $isStaleApp = $false
+    if ($staleAppIds.Contains($appId)) { $isStaleApp = $true }
+
+    $tags = @('No Service Principal')
+    if ($vendorInfo.IsMicrosoft) { $tags += 'Microsoft' }
+    elseif ($vendorInfo.IsThirdParty) { $tags += '3rd Party' }
+    elseif ($vendorInfo.IsHomeTenant) { $tags += 'Home Tenant' }
+    if ($isStaleApp) { $tags += 'staleApps' }
+
+    $appSummaries += [pscustomobject]@{
+        clientId      = "app:$appId"
+        clientName    = $appProfile.Name
+        clientAppId   = $appId
+        notes         = $appDescription
+        ssoState      = Get-SsoState -ReplyUrls $redirectUris -PreferredSingleSignOnMode $null
+    staleApp      = $isStaleApp
+        status        = 'pass'
+        tags          = $tags
+        isMicrosoft   = $vendorInfo.IsMicrosoft
+        isThirdParty  = $vendorInfo.IsThirdParty
+        isHomeTenant  = $vendorInfo.IsHomeTenant
+        isHidden      = $false
+        vendorInfo    = $vendorInfo
+        adminGrants   = @()
+        userGrants    = @()
+        allScopes     = @()
+    }
+}
+
+Update-Progress -Message 'Generate CSV/HTML report'
 
         $impactSummary = @{
             microsoft = [ordered]@{ critical = 0; elevated = 0; low = 0 }
@@ -788,6 +1146,7 @@ $warnCount = @($appSummaries | Where-Object status -eq 'warn').Count
 $microsoftCount = @($appSummaries | Where-Object isMicrosoft).Count
 $thirdPartyCount = @($appSummaries | Where-Object isThirdParty).Count
 $homeTenantCount = @($appSummaries | Where-Object isHomeTenant).Count
+$staleCount = @($appSummaries | Where-Object staleApp).Count
 
 $outDir = (Get-Location).Path
 $timestamp = Get-Date -Format 'yyyyMMdd_HHmm'
@@ -819,6 +1178,9 @@ $appSummaries |
                   @{n='servicePrincipalNameMatchesMicrosoft';e={$_.vendorInfo.ServicePrincipalNameMatchesMicrosoft}},
                   @{n='servicePrincipalNameMatchesTenant';e={$_.vendorInfo.ServicePrincipalNameMatchesTenant}},
                   @{n='servicePrincipalTags';e={($_.vendorInfo.Tags) -join ';'}},
+                  @{n='notes';e={$_.notes}},
+                  @{n='ssoState';e={$_.ssoState}},
+                  @{n='staleApp';e={$_.staleApp}},
                   @{n='tags';e={$_.tags -join ';'}},
                   @{n='adminScopes';e={($_.adminGrants | ForEach-Object { "{0}:{1}" -f $_.resource, $_.scope }) -join ';'}},
                   @{n='userScopes'; e={($_.userGrants  | ForEach-Object { "{0}:{1}" -f $_.resource, $_.scope }) -join ';'}},
@@ -827,7 +1189,7 @@ $appSummaries |
 
 $report = [pscustomobject]@{
     generatedAt = (Get-Date).ToString('s')
-    totals      = @{ total=$totalApps; pass=$passCount; warn=$warnCount; fail=$failCount; microsoft=$microsoftCount; thirdParty=$thirdPartyCount; homeTenant=$homeTenantCount }
+    totals      = @{ total=$totalApps; pass=$passCount; warn=$warnCount; fail=$failCount; microsoft=$microsoftCount; thirdParty=$thirdPartyCount; homeTenant=$homeTenantCount; stale=$staleCount }
     impactSummary = $impactSummary
     items       = $appSummaries
 }
@@ -886,6 +1248,7 @@ $htmlTemplate = @'
     .tag-thirdparty{background:rgba(255,177,71,0.12);border-color:rgba(255,177,71,0.7);color:#ffd7a2}
     .tag-home{background:rgba(0,194,168,0.16);border:1px solid rgba(0,194,168,0.55);color:#d5fff6}
     .tag-hidden{background:rgba(148,163,184,0.12);border-color:rgba(148,163,184,0.6);color:#d8dee9;font-style:italic}
+    .tag-stale{background:rgba(255,209,102,0.12);border-color:rgba(255,209,102,0.7);color:#ffe9ad}
   .tag-clickable{cursor:pointer}
   .tag-clickable:focus-visible{outline:none;box-shadow:var(--focus-ring)}
   .tag-clickable:hover{transform:translateY(-1px)}
@@ -977,6 +1340,7 @@ $htmlTemplate = @'
       <span id="chipMicrosoft" class="chip clickable" role="button" tabindex="0" aria-pressed="false"><span class="status microsoft"></span><b id="tMicrosoft">0</b> Microsoft apps</span>
       <span id="chipThirdParty" class="chip clickable" role="button" tabindex="0" aria-pressed="false"><span class="status thirdparty"></span><b id="tThirdParty">0</b> 3rd party apps</span>
       <span id="chipHomeTenant" class="chip clickable" role="button" tabindex="0" aria-pressed="false"><span class="status home"></span><b id="tHomeTenant">0</b> Home tenant apps</span>
+            <span id="chipStale" class="chip clickable" role="button" tabindex="0" aria-pressed="false"><span class="status warn"></span><b id="tStale">0</b> Inactive Apps (Entra Recommendation)</span>
     </div>
     <div class="header-controls">
       <input id="q" type="search" placeholder="Search enterprise app" />
@@ -1003,7 +1367,7 @@ $htmlTemplate = @'
 const report = JSON.parse(document.getElementById("reportData").textContent);
 
 // --- State & Elements ---
-const state = { q:"", status:"all", consent:"any", vendor:"any", sort:"asc" };
+const state = { q:"", status:"all", consent:"any", vendor:"any", stale:false, sort:"asc" };
 const $q = document.getElementById("q");
 const $list = document.getElementById("list");
 const $impactGrid = document.getElementById("impactGrid");
@@ -1057,6 +1421,7 @@ const $chipLow = document.getElementById("chipLow");
 const $chipMicrosoft = document.getElementById("chipMicrosoft");
 const $chipThirdParty = document.getElementById("chipThirdParty");
 const $chipHomeTenant = document.getElementById("chipHomeTenant");
+const $chipStale = document.getElementById("chipStale");
 const $visibleCount = document.getElementById("visibleCount");
 const $sortToggle = document.getElementById("sortToggle");
 
@@ -1068,6 +1433,7 @@ document.getElementById("tFail").textContent  = report.totals.fail;
 document.getElementById("tMicrosoft").textContent = report.totals.microsoft;
 document.getElementById("tThirdParty").textContent = report.totals.thirdParty;
 document.getElementById("tHomeTenant").textContent = report.totals.homeTenant;
+document.getElementById("tStale").textContent = report.totals.stale || 0;
 document.getElementById("genAt").textContent  = report.generatedAt;
 
 // Search input
@@ -1110,6 +1476,11 @@ function toggleVendorFilter(vendor){
     updateVendorChips();
     render();
 }
+function toggleStaleFilter(){
+        state.stale = !state.stale;
+        updateStaleChip();
+        render();
+}
 function updateVendorChips(){
   const vendorMapping = [
     [$chipMicrosoft, "microsoft"],
@@ -1123,13 +1494,19 @@ function updateVendorChips(){
     chip.setAttribute("aria-pressed", String(active));
   });
 }
+function updateStaleChip(){
+    if(!$chipStale) return;
+    $chipStale.classList.toggle("active", state.stale);
+    $chipStale.setAttribute("aria-pressed", String(state.stale));
+}
 $chipCritical.addEventListener("click", ()=> toggleStatusFilter("fail"));
 $chipElevated.addEventListener("click", ()=> toggleStatusFilter("warn"));
 $chipLow.addEventListener("click", ()=> toggleStatusFilter("pass"));
 $chipMicrosoft.addEventListener("click", ()=> toggleVendorFilter("microsoft"));
 $chipThirdParty.addEventListener("click", ()=> toggleVendorFilter("thirdparty"));
 $chipHomeTenant.addEventListener("click", ()=> toggleVendorFilter("home"));
-[$chipCritical,$chipElevated,$chipLow,$chipMicrosoft,$chipThirdParty,$chipHomeTenant].forEach(chip=>{
+$chipStale.addEventListener("click", toggleStaleFilter);
+[$chipCritical,$chipElevated,$chipLow,$chipMicrosoft,$chipThirdParty,$chipHomeTenant,$chipStale].forEach(chip=>{
   if(!chip) return;
   chip.addEventListener("keydown", event=>{
     if(event.key === "Enter" || event.key === " "){
@@ -1140,6 +1517,7 @@ $chipHomeTenant.addEventListener("click", ()=> toggleVendorFilter("home"));
 });
 updateStatusChips();
 updateVendorChips();
+updateStaleChip();
 renderImpactGrid();
 
 function toggleConsentFilter(consent){
@@ -1148,28 +1526,34 @@ function toggleConsentFilter(consent){
 }
 
 $list.addEventListener("click", (event)=>{
-  const tag = event.target.closest('.tag[data-consent], .tag[data-vendor]');
+    const tag = event.target.closest('.tag[data-consent], .tag[data-vendor], .tag[data-stale]');
   if(!tag) return;
   const consent = tag.getAttribute('data-consent');
   const vendor = tag.getAttribute('data-vendor');
+    const stale = tag.getAttribute('data-stale');
   if(consent){
     toggleConsentFilter(consent);
   } else if(vendor){
     toggleVendorFilter(vendor);
+    } else if(stale){
+        toggleStaleFilter();
   }
 });
 
 $list.addEventListener("keydown", (event)=>{
-  const tag = event.target.closest('.tag[data-consent], .tag[data-vendor]');
+    const tag = event.target.closest('.tag[data-consent], .tag[data-vendor], .tag[data-stale]');
   if(!tag) return;
   if(event.key === "Enter" || event.key === " "){
     event.preventDefault();
     const consent = tag.getAttribute('data-consent');
     const vendor = tag.getAttribute('data-vendor');
+        const stale = tag.getAttribute('data-stale');
     if(consent){
       toggleConsentFilter(consent);
     } else if(vendor){
       toggleVendorFilter(vendor);
+        } else if(stale){
+            toggleStaleFilter();
     }
   }
 });
@@ -1183,6 +1567,7 @@ function tagHtml(t){
   const isThirdParty = lower === "3rd party";
   const isHomeTenant = lower === "home tenant";
   const isHidden = lower === "hidden";
+    const isStale = lower === "staleapps";
   if (isAdmin || isUser){
     const consent = isAdmin ? "admin" : "user";
     const classes = ["tag", isAdmin ? "tag-admin" : "tag-user", "tag-clickable"];
@@ -1211,6 +1596,11 @@ function tagHtml(t){
   if (isHidden){
     return `<span class="tag tag-hidden">${label}</span>`;
   }
+    if (isStale){
+        const classes = ["tag","tag-stale","tag-clickable"];
+        if(state.stale){ classes.push("tag-active"); }
+        return `<span class="${classes.join(" ")}" data-stale="true" role="button" tabindex="0" aria-pressed="${state.stale}">${label}</span>`;
+    }
   return `<span class="tag">${label}</span>`;
 }
 function filterItems(items){
@@ -1221,6 +1611,7 @@ function filterItems(items){
   if(state.vendor === "microsoft"){ out = out.filter(x => x.isMicrosoft); }
   if(state.vendor === "thirdparty"){ out = out.filter(x => x.isThirdParty); }
   if(state.vendor === "home"){ out = out.filter(x => x.isHomeTenant); }
+    if(state.stale){ out = out.filter(x => (x.tags||[]).some(t => String(t).toLowerCase() === "staleapps")); }
   if(state.q){
     const q = state.q;
     out = out.filter(x => (x.clientName||"").toLowerCase().includes(q));
@@ -1280,6 +1671,8 @@ function render(){
     const publisherDomainEsc = info.PublisherDomain ? escapeHtml(info.PublisherDomain) : "—";
     const spNames = Array.isArray(info.ServicePrincipalNames) ? info.ServicePrincipalNames : [];
     const spNameDisplay = spNames.length ? escapeHtml(spNames.slice(0,3).join(", ")) + (spNames.length > 3 ? " …" : "") : "—";
+        const notes = item.notes ? escapeHtml(item.notes) : "—";
+        const ssoState = item.ssoState ? escapeHtml(item.ssoState) : "—";
     const metadataBlock = `
         <div class="sec-title">App metadata</div>
         <div class="meta-grid">
@@ -1289,6 +1682,8 @@ function render(){
           <div><span class="meta-label">App owner org</span><span class="meta-value">${ownerOrgEsc}</span></div>
           <div><span class="meta-label">Service principal names</span><span class="meta-value">${spNameDisplay}</span></div>
           <div><span class="meta-label">SP tags</span><span class="meta-value">${spTagsEsc}</span></div>
+                    <div><span class="meta-label">SSO state</span><span class="meta-value">${ssoState}</span></div>
+                    <div><span class="meta-label">Notes</span><span class="meta-value">${notes}</span></div>
         </div>
         <div class="divider"></div>`;
         return `
@@ -1319,7 +1714,7 @@ function copyJson(obj){ navigator.clipboard.writeText(JSON.stringify(obj,null,2)
 // Export CSV (current filter selection)
 document.getElementById("exportCsv").addEventListener("click", () => {
   const items = filterItems(report.items);
-  const headers = ["clientName","clientAppId","status","isMicrosoft","isThirdParty","isHomeTenant","isHidden","tags","adminScopes","userScopes","userCount"];
+        const headers = ["clientName","clientAppId","status","isMicrosoft","isThirdParty","isHomeTenant","isHidden","staleApp","ssoState","notes","tags","adminScopes","userScopes","userCount"];
   const rows = items.map(x=>{
     const adminScopes = (x.adminGrants||[]).map(a=>`${a.resource}:${a.scope}`).join(";")
     const userScopes  = (x.userGrants ||[]).map(u=>`${u.resource}:${u.scope}`).join(";")
@@ -1333,6 +1728,9 @@ document.getElementById("exportCsv").addEventListener("click", () => {
       isThirdParty: x.isThirdParty ? "true" : "false",
       isHomeTenant: x.isHomeTenant ? "true" : "false",
       isHidden: x.isHidden ? "true" : "false",
+    staleApp: x.staleApp ? "true" : "false",
+            ssoState: x.ssoState || "",
+            notes: x.notes || "",
       tags,
       adminScopes,
       userScopes,
@@ -1358,6 +1756,8 @@ $html = $htmlTemplate.Replace('__REPORT_JSON__', $jsonSafe)
 $ts = Get-Date -Format "yyyyMMdd_HHmm"
 $htmlPath = Join-Path $outDir ("OAuth2_Consent_Report_$ts.html")
 Set-Content -Path $htmlPath -Encoding UTF8 -Value $html
+
+Complete-Progress
 
 Write-Host "`nDone:" -ForegroundColor Cyan
 Write-Host "  CSV : $csvPath"

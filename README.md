@@ -31,7 +31,7 @@ Install-Module Microsoft.Graph.Authentication -Scope CurrentUser
 Import-Module Microsoft.Graph.Authentication
 # Optional: pick needed profile (beta is default when using Invoke-MgGraphRequest)
 # Select-MgProfile -Name beta
-Connect-MgGraph -Scopes 'Directory.Read.All','Application.Read.All'
+Connect-MgGraph -Scopes 'Directory.Read.All','Application.Read.All','DirectoryRecommendations.Read.All'
 ```
 
 If `Connect-MgGraph` prompts for admin consent, ensure you sign in with an account that can grant those scopes tenant-wide.
