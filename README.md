@@ -13,6 +13,17 @@ PowerShell script that inventories Entra ID OAuth delegated consents, enriches t
   - **CSV** with raw data and metadata for spreadsheets or SIEM ingestion.
   - **HTML** dashboard with search, consent-type chips, Microsoft/third-party toggles, vendor tags, alphabetical sort toggle, and CSV export of any filtered view.
 
+
+- **Demo - Overview**: 
+
+![Demo - Overview](./demo_02.png)
+
+
+- **Demo - App Detail**: 
+
+![Demo - App Detail](./demo_01.png)
+
+
 ## ✅ Prerequisites
 
 | Requirement | Notes |
