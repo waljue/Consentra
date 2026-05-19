@@ -1374,8 +1374,8 @@ $htmlTemplate = @'
   <div class="wrap">
     <div class="brand-row">
       <div>
-        <div class="brand-name">Consentra<span class="dot">•</span></div>
-        <div class="brand-sub">Entra ID — OAuth Consent Report</div>
+        <div class="brand-name">Consentra<span class="dot">&bull;</span></div>
+        <div class="brand-sub">Entra ID &mdash; OAuth Consent Report</div>
       </div>
       <div class="brand-meta">
         <b id="tTotal">0</b> enterprise apps
@@ -1404,11 +1404,11 @@ $htmlTemplate = @'
     </div>
     <div class="filter-row">
       <span class="filter-label">Find</span>
-      <input id="q" type="search" placeholder="Search app name…" />
+      <input id="q" type="search" placeholder="Search app name&hellip;" />
       <span id="chipHasNotes" class="chip chip-toggle" role="button" tabindex="0" aria-pressed="false" title="Show only apps with notes">Has notes</span>
       <span id="chipNoNotes" class="chip chip-toggle" role="button" tabindex="0" aria-pressed="false" title="Show only apps without notes">No notes</span>
       <span class="filter-sep"></span>
-      <button id="sortToggle" type="button" aria-pressed="false" title="Sort apps alphabetically">Sort A→Z</button>
+      <button id="sortToggle" type="button" aria-pressed="false" title="Sort apps alphabetically">Sort A&rarr;Z</button>
       <button id="exportCsv" title="Export filtered apps to CSV">Export CSV</button>
     </div>
   </div>
@@ -1880,7 +1880,7 @@ $html = $htmlTemplate.Replace('__REPORT_JSON__', $jsonSafe)
 
 $ts = Get-Date -Format "yyyyMMdd_HHmm"
 $htmlPath = Join-Path $outDir ("OAuth2_Consent_Report_$ts.html")
-Set-Content -Path $htmlPath -Encoding UTF8 -Value $html
+[System.IO.File]::WriteAllText($htmlPath, $html, (New-Object System.Text.UTF8Encoding $false))
 
 Complete-Progress
 
