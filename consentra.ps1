@@ -1417,15 +1417,15 @@ $htmlTemplate = @'
 <div id="list"></div>
 <div class="footer">
   <span class="sig">
-    <a href="https://whennotif.com" target="_blank" rel="noopener" title="whennotif•">whennotif<span style="color:var(--red)">•</span></a>
-    — created by <strong>Jürgen Waldl</strong>
+    <a href="https://whennotif.com" target="_blank" rel="noopener" title="whennotif&bull;">whennotif<span style="color:var(--red)">&bull;</span></a>
+    &mdash; created by <strong>J&uuml;rgen Waldl</strong>
     <a href="https://www.linkedin.com/in/j%C3%BCrgen-waldl-6592837b/" target="_blank" rel="noopener" title="LinkedIn">
       <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
         <path d="M4.98 3.5C4.98 4.88 3.86 6 2.5 6S0 4.88 0 3.5 1.12 1 2.5 1 4.98 2.12 4.98 3.5zM0 8h5v16H0zM8 8h4.8v2.2h.07c.67-1.2 2.3-2.46 4.73-2.46 5.06 0 6 3.33 6 7.66V24h-5V16.4c0-1.8-.03-4.1-2.5-4.1-2.5 0-2.88 1.95-2.88 3.97V24H8z"/>
       </svg>
     </a>
   </span>
-  <div>generated — <span id="genAt2"></span></div>
+  <div>generated &mdash; <span id="genAt2"></span></div>
 </div>
 <script id="reportData" type="application/json">__REPORT_JSON__</script>
 <script>
@@ -1522,9 +1522,9 @@ document.addEventListener("keydown", e=>{ if(e.key==="/" && (e.ctrlKey||e.metaKe
 
 function updateSortButton(){
     const asc = state.sort === "asc";
-    $sortToggle.textContent = asc ? "Sort A→Z" : "Sort Z→A";
+    $sortToggle.textContent = asc ? "Sort A\u2192Z" : "Sort Z\u2192A";
     $sortToggle.setAttribute("aria-pressed", String(!asc));
-    $sortToggle.title = asc ? "Sort descending (Z→A)" : "Sort ascending (A→Z)";
+    $sortToggle.title = asc ? "Sort descending (Z\u2192A)" : "Sort ascending (A\u2192Z)";
 }
 $sortToggle.addEventListener("click", ()=>{
     state.sort = state.sort === "asc" ? "desc" : "asc";
@@ -1753,9 +1753,9 @@ function render(){
             const impact = getImpactMeta(a.impact);
             const scopeBadge = `<span class="scope-badge ${impact.className}" title="${impact.label}">${escapeHtml(a.scope)}</span>`;
             const rowTitle = impact.label ? ` title="${impact.label} scope"` : "";
-            const revokeLink = _permUrl ? `<a class="portal-link" href="${_permUrl}" target="_blank" rel="noopener" title="Revoke in Entra portal">↗ Revoke</a>` : "";
-            const copyBtn = a.grantId ? `<button class="copy-btn" onclick="copyPsRevoke('${escapeHtml(a.grantId)}')" title="Copy PowerShell command to revoke this grant&#10;Remove-MgOauth2PermissionGrant -OAuth2PermissionGrantId '${escapeHtml(a.grantId)}'">⧉ Copy PS</button>` : "";
-            return `<div class="consent-row" data-impact="${impact.key}"${rowTitle}><span class="pill">Admin</span> ${escapeHtml(a.resource)} • ${scopeBadge}${revokeLink}${copyBtn}</div>`;
+            const revokeLink = _permUrl ? `<a class="portal-link" href="${_permUrl}" target="_blank" rel="noopener" title="Revoke in Entra portal">\u2197 Revoke</a>` : "";
+            const copyBtn = a.grantId ? `<button class="copy-btn" onclick="copyPsRevoke('${escapeHtml(a.grantId)}')" title="Copy PowerShell command to revoke this grant&#10;Remove-MgOauth2PermissionGrant -OAuth2PermissionGrantId '${escapeHtml(a.grantId)}'">\u29C9 Copy PS</button>` : "";
+            return `<div class="consent-row" data-impact="${impact.key}"${rowTitle}><span class="pill">Admin</span> ${escapeHtml(a.resource)} \u2022 ${scopeBadge}${revokeLink}${copyBtn}</div>`;
         }).join("");
         const userRows  = (item.userGrants ||[]).map(u=>{
             const impact = getImpactMeta(u.impact);
@@ -1767,15 +1767,15 @@ function render(){
                     const directUrl = (d.principalId && d.assignmentId && _spId)
                         ? entraUserConsentUrl(d.principalId, d.assignmentId, _spId)
                         : null;
-                    const copyBtn = d.grantId ? `<button class="copy-btn" onclick="copyPsRevoke('${escapeHtml(d.grantId)}')" title="Copy PowerShell command to revoke this user's grant&#10;Remove-MgOauth2PermissionGrant -OAuth2PermissionGrantId '${escapeHtml(d.grantId)}'">⧉ Copy PS</button>` : "";
+                    const copyBtn = d.grantId ? `<button class="copy-btn" onclick="copyPsRevoke('${escapeHtml(d.grantId)}')" title="Copy PowerShell command to revoke this user's grant&#10;Remove-MgOauth2PermissionGrant -OAuth2PermissionGrantId '${escapeHtml(d.grantId)}'">\u29C9 Copy PS</button>` : "";
                     const userLabel = directUrl
-                        ? `<a class="portal-link" href="${directUrl}" target="_blank" rel="noopener" title="Remove assignment for this user in Azure portal">${escapeHtml(d.upn||d.principalId)} ↗</a>`
+                        ? `<a class="portal-link" href="${directUrl}" target="_blank" rel="noopener" title="Remove assignment for this user in Azure portal">${escapeHtml(d.upn||d.principalId)} \u2197</a>`
                         : `<span>${escapeHtml(d.upn||d.principalId)}</span>`;
                     return userLabel + copyBtn;
                 }).join(" ")
                 : escapeHtml(asArray(u.users).join(", "));
-            const overviewLink = _permUrl ? `<a class="portal-link" href="${_permUrl}" target="_blank" rel="noopener" title="All permissions overview in Entra portal">Permissions ↗</a>` : "";
-            return `<div class="consent-row" data-impact="${impact.key}"${rowTitle}><span class="pill">User</span> ${escapeHtml(u.resource)} • ${scopeBadge} • ${usersHtml} ${overviewLink}</div>`;
+            const overviewLink = _permUrl ? `<a class="portal-link" href="${_permUrl}" target="_blank" rel="noopener" title="All permissions overview in Entra portal">Permissions \u2197</a>` : "";
+            return `<div class="consent-row" data-impact="${impact.key}"${rowTitle}><span class="pill">User</span> ${escapeHtml(u.resource)} \u2022 ${scopeBadge} \u2022 ${usersHtml} ${overviewLink}</div>`;
         }).join("");
     const hasAdmin = !!adminRows, hasUser = !!userRows;
     const sections = [
@@ -1788,15 +1788,15 @@ function render(){
     const info = item.vendorInfo || {};
     const vendorClass = info.IsMicrosoft ? "Microsoft" : (info.IsThirdParty ? "3rd Party" : (info.IsHomeTenant ? "Home tenant" : "Custom / unknown"));
     const vendorClassEsc = escapeHtml(vendorClass);
-    const verifiedPublisherRaw = info.VerifiedPublisherName || info.Publisher || "—";
+    const verifiedPublisherRaw = info.VerifiedPublisherName || info.Publisher || "\u2014";
     const verifiedPublisherEsc = escapeHtml(verifiedPublisherRaw);
-    const ownerOrgEsc = info.OwnerOrg ? escapeHtml(info.OwnerOrg) : "—";
-    const spTagsEsc = (info.Tags && info.Tags.length) ? escapeHtml(info.Tags.join(", ")) : "—";
-    const publisherDomainEsc = info.PublisherDomain ? escapeHtml(info.PublisherDomain) : "—";
+    const ownerOrgEsc = info.OwnerOrg ? escapeHtml(info.OwnerOrg) : "\u2014";
+    const spTagsEsc = (info.Tags && info.Tags.length) ? escapeHtml(info.Tags.join(", ")) : "\u2014";
+    const publisherDomainEsc = info.PublisherDomain ? escapeHtml(info.PublisherDomain) : "\u2014";
     const spNames = Array.isArray(info.ServicePrincipalNames) ? info.ServicePrincipalNames : [];
-    const spNameDisplay = spNames.length ? escapeHtml(spNames.slice(0,3).join(", ")) + (spNames.length > 3 ? " …" : "") : "—";
-        const notes = item.notes ? escapeHtml(item.notes) : "—";
-        const ssoState = item.ssoState ? escapeHtml(item.ssoState) : "—";
+    const spNameDisplay = spNames.length ? escapeHtml(spNames.slice(0,3).join(", ")) + (spNames.length > 3 ? " \u2026" : "") : "\u2014";
+        const notes = item.notes ? escapeHtml(item.notes) : "\u2014";
+        const ssoState = item.ssoState ? escapeHtml(item.ssoState) : "\u2014";
     const metadataBlock = `
         <div class="sec-title">App metadata</div>
         <div class="meta-grid">
@@ -1815,12 +1815,12 @@ function render(){
                 <div class="item">
                     <div>
                         <div class="app-name">${escapeHtml(item.clientName||"(no name)")}</div>
-                        <div class="app-id">${escapeHtml(item.clientAppId||"")} · ${scopeArr.length} scope(s)</div>
+                        <div class="app-id">${escapeHtml(item.clientAppId||"")} \u00B7 ${scopeArr.length} scope(s)</div>
                         <div class="tags">${tags}</div>
                     </div>
                     <div class="actions">
-                        ${_permUrl ? `<a class="btn-portal" href="${_permUrl}" target="_blank" rel="noopener" title="Manage permissions in Entra portal">Entra ↗</a>` : ""}
-                        <button onclick='copyJson(${JSON.stringify(item).replace(/</g,"\\u003c")})' title="Copy JSON">⧉ JSON</button>
+                        ${_permUrl ? `<a class="btn-portal" href="${_permUrl}" target="_blank" rel="noopener" title="Manage permissions in Entra portal">Entra \u2197</a>` : ""}
+                        <button onclick='copyJson(${JSON.stringify(item).replace(/</g,"\\u003c")})' title="Copy JSON">&#x29C9; JSON</button>
                     </div>
                 </div>
                 <details>
